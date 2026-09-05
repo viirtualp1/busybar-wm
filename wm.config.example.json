@@ -1,0 +1,37 @@
+{
+  "apps": [
+    {
+      "name": "dota",
+      "rank": 40,
+      "cwd": "../busybar-dota",
+      "command": "npm",
+      "args": ["start"],
+      "restart": true
+    },
+    {
+      "name": "chess",
+      "rank": 30,
+      "cwd": "../busybar-chess",
+      "command": "npm",
+      "args": ["start"]
+    },
+    {
+      "name": "nowplaying",
+      "rank": 20,
+      "cwd": "../busybar-nowplaying",
+      "command": "npm",
+      "args": ["start"],
+      "env": {
+        "INPUT": "1"
+      }
+    },
+    {
+      "name": "livesplit",
+      "rank": 60,
+      "cwd": "../busybar-livesplit",
+      "command": "npm",
+      "args": ["start"],
+      "autostart": false
+    }
+  ]
+}

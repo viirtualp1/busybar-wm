@@ -1,0 +1,62 @@
+{
+  "name": "busybar-wm",
+  "version": "0.1.0",
+  "description": "A window manager for the BUSY Bar: one screen, many apps, arbitrated by a reverse proxy in front of the device",
+  "author": "viirtualp1",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/viirtualp1/busybar-wm.git"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "busybar-wm": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example",
+    "wm.config.example.json"
+  ],
+  "keywords": [
+    "busy-bar",
+    "busybar",
+    "window-manager",
+    "supervisor",
+    "reverse-proxy",
+    "led"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "check": "npm run lint && npm run typecheck && npm test",
+    "dev": "tsx src/cli.ts",
+    "mock": "tsx src/mock-bar.ts",
+    "start": "npm run build && node dist/cli.js",
+    "prepublishOnly": "npm run check && npm run build"
+  },
+  "dependencies": {
+    "busybar-kit": "^0.2.0"
+  },
+  "devDependencies": {
+    "@busy-app/busy-lib": "^0.18.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.3",
+    "eslint": "^10.8.1",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.67.0"
+  }
+}
