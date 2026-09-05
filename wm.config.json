@@ -1,0 +1,30 @@
+{
+  "apps": [
+    {
+      "name": "livesplit",
+      "rank": 60,
+      "cwd": "../busybar-livesplit",
+      "command": "npm",
+      "args": ["start"],
+      "autostart": false
+    },
+    {
+      "name": "mydota",
+      "rank": 50,
+      "cwd": "../busybar-mydota",
+      "command": "npm",
+      "args": ["start"],
+      "restart": true
+    },
+    {
+      "name": "nowplaying",
+      "rank": 20,
+      "cwd": "../busybar-nowplaying",
+      "command": "npm",
+      "args": ["start"],
+      "env": {
+        "INPUT": "1"
+      }
+    }
+  ]
+}

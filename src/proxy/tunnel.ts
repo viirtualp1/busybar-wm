@@ -24,13 +24,9 @@ export async function tunnel(
   const secure = target.protocol === 'https:';
   const port = Number(target.port || (secure ? 443 : 80));
 
-  // The device wants its credential in the query string on this socket, and an
-  // app behind the proxy is not meant to hold one.
-  const credential =
-    upstream.headers()['x-api-token'] ?? upstream.headers()['authorization'];
-  if (credential && !target.searchParams.has('x-api-token')) {
-    target.searchParams.set('x-api-token', credential.replace(/^Bearer /i, ''));
-  }
+  // Apps behind the proxy send a dummy token; replace it so the device
+  // does not close the socket on the placeholder.
+  stampCredential(target, upstream);
 
   const server = secure
     ? tlsConnect({ host: target.hostname, port, servername: target.hostname })
@@ -56,18 +52,33 @@ export async function tunnel(
   server.on('close', shutdown);
 }
 
+const SKIP_HEADERS = new Set(['host', 'authorization', 'x-api-token']);
+
 /** The original request line and headers, pointed at the device. */
 function upgradeRequest(req: IncomingMessage, target: URL): string {
   const lines = [`${req.method ?? 'GET'} ${target.pathname}${target.search} HTTP/1.1`];
   for (const [key, value] of Object.entries(req.headers)) {
-    if (value === undefined || key === 'host') {
+    if (value === undefined || SKIP_HEADERS.has(key)) {
       continue;
     }
     for (const item of Array.isArray(value) ? value : [value]) {
       lines.push(`${key}: ${item}`);
     }
   }
+  const token = target.searchParams.get('x-api-token');
+  if (token) {
+    lines.push(`x-api-token: ${token}`);
+  }
   lines.push(`host: ${target.host}`, '', '');
 
   return lines.join('\r\n');
+}
+
+export function stampCredential(target: URL, upstream: Upstream): void {
+  const credential =
+    upstream.headers()['x-api-token'] ?? upstream.headers()['authorization'];
+  if (!credential) {
+    return;
+  }
+  target.searchParams.set('x-api-token', credential.replace(/^Bearer /i, ''));
 }

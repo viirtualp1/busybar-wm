@@ -74,14 +74,18 @@ export class Supervisor {
       return;
     }
 
-    const proc = spawn(manifest.command, manifest.args, {
-      ...(manifest.cwd ? { cwd: manifest.cwd } : {}),
-      env: this.childEnv(manifest),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      // `npm start` is a shell that execs node; signalling the group is the
-      // only way the app itself hears about the shutdown.
-      detached: true,
-    });
+    let proc: ChildProcess;
+    try {
+      proc = spawnChild(manifest.command, manifest.args, {
+        ...(manifest.cwd ? { cwd: manifest.cwd } : {}),
+        env: this.childEnv(manifest),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`[${manifest.name}] failed to start: ${message}`);
+      this.scheduleRestart(child, false);
+      return;
+    }
 
     child.process = proc;
     this.options.registry.setRunning(manifest.name, true);
@@ -140,6 +144,14 @@ export class Supervisor {
 
   private signal(pid: number, signal: NodeJS.Signals): void {
     try {
+      if (process.platform === 'win32') {
+        // Negative pids are a Unix process-group trick; on Windows the tree
+        // is `taskkill /t`. `/f` is SIGKILL. Without it, console apps often
+        // ignore the request and the grace period expires into a force-kill.
+        const args = ['/pid', String(pid), '/t', '/f'];
+        spawn('taskkill', args, { stdio: 'ignore', windowsHide: true });
+        return;
+      }
       // Negative pid is the process group, which `detached` gave the child.
       process.kill(-pid, signal);
     } catch {
@@ -174,4 +186,46 @@ export class Supervisor {
       });
     }
   }
+}
+
+function spawnChild(
+  command: string,
+  args: string[],
+  extra: { cwd?: string; env: NodeJS.ProcessEnv },
+): ChildProcess {
+  const common = {
+    ...extra,
+    stdio: ['ignore', 'pipe', 'pipe'] as const,
+    windowsHide: true,
+  };
+
+  if (process.platform !== 'win32') {
+    // `npm start` is a shell that execs node; signalling the group is the
+    // only way the app itself hears about the shutdown.
+    return spawn(command, args, { ...common, detached: true });
+  }
+
+  // CVE-2024-27980: .cmd/.bat cannot be spawned without a shell (EINVAL).
+  // Detached + piped stdio is also EINVAL on Windows, so the tree is killed
+  // with taskkill instead of a process group.
+  if (needsWindowsShell(command)) {
+    return spawn(joinWindowsCommand(command, args), { ...common, shell: true });
+  }
+
+  return spawn(command, args, common);
+}
+
+function needsWindowsShell(command: string): boolean {
+  return /\.(cmd|bat)$/i.test(command) || /^(npm|npx|yarn|pnpm)$/i.test(command);
+}
+
+function joinWindowsCommand(command: string, args: string[]): string {
+  return [command, ...args].map(quoteWindowsArg).join(' ');
+}
+
+function quoteWindowsArg(value: string): string {
+  if (!/[\s"]/u.test(value)) {
+    return value;
+  }
+  return `"${value.replaceAll('"', '\\"')}"`;
 }

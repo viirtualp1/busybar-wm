@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { parseManifest } from '../src/manifest.js';
 
@@ -26,7 +27,7 @@ test('paths are relative to the manifest, not to wherever you ran the daemon', (
     '/home/me/pet-projects/busybar-wm',
   );
 
-  assert.equal(apps[0]?.cwd, '/home/me/pet-projects/busybar-dota');
+  assert.equal(apps[0]?.cwd, resolve('/home/me/pet-projects/busybar-wm', '../busybar-dota'));
 });
 
 test('two apps cannot share a name, because the name is the identity', () => {

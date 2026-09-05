@@ -95,3 +95,36 @@ test('an app that was not given a command is left alone', async () => {
   assert.equal(registry.get('fake')?.running, false);
   await supervisor.stop();
 });
+
+test('npm as a command is spawnable', async () => {
+  const lines: string[] = [];
+  const npm = manifest({
+    command: 'npm',
+    args: ['--version'],
+    restart: false,
+  });
+  const registry = new Registry([npm], { staleMs: 1000 });
+  const supervisor = new Supervisor([npm], {
+    proxyAddr: 'http://127.0.0.1:4999',
+    registry,
+    restartDelayMs: 100,
+    logger: {
+      info: (line) => lines.push(line),
+      warn: (line) => lines.push(line),
+    },
+  });
+
+  supervisor.start();
+  try {
+    await until('npm to print a version', () =>
+      lines.some((line) => /\d+\.\d+\.\d+/.test(line)),
+    );
+    assert.equal(
+      lines.some((line) => /EINVAL/i.test(line)),
+      false,
+      lines.join('\n'),
+    );
+  } finally {
+    await supervisor.stop();
+  }
+});
