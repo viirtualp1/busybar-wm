@@ -27,7 +27,7 @@
       }
     },
     {
-      "name": "mydota",
+      "name": "dota",
       "rank": 10,
       "cwd": "../busybar-dota",
       "command": "npm",
