@@ -25,6 +25,14 @@
       "env": {
         "INPUT": "1"
       }
-    }
+    },
+    {
+      "name": "mydota",
+      "rank": 10,
+      "cwd": "../busybar-dota",
+      "command": "npm",
+      "args": ["start"],
+      "restart": true
+    },
   ]
 }
