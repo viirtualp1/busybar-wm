@@ -33,6 +33,6 @@
       "command": "npm",
       "args": ["start"],
       "restart": true
-    },
+    }
   ]
 }
