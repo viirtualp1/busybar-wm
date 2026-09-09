@@ -1,26 +1,26 @@
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { profileAt } from 'busybar-kit/profile';
 import { parseManifest } from '../src/manifest.js';
-import { profileAt } from '../src/profile.js';
 
 const DIR = resolve('/home/me/.busybar');
 
 /** A profile where only the named packages were installed. */
-function profile(installed: string[] = [], platform: NodeJS.Platform = 'linux') {
+function profile(installed: string[] = []) {
   const bins = new Set(installed.map((name) => join(DIR, 'node_modules', '.bin', name)));
 
-  return profileAt(DIR, { platform, exists: (path) => bins.has(path) });
+  return profileAt(DIR, { platform: 'linux', exists: (path) => bins.has(path) });
 }
 
 test('an app with nothing said runs the package the profile installed', () => {
   const { apps } = parseManifest(
     { apps: [{ name: 'mydota', rank: 50 }] },
     '/base',
-    profile(['mydota']),
+    profile(['busybar-mydota']),
   );
 
-  assert.equal(apps[0]?.command, join(DIR, 'node_modules', '.bin', 'mydota'));
+  assert.equal(apps[0]?.command, join(DIR, 'node_modules', '.bin', 'busybar-mydota'));
   assert.equal(apps[0]?.autostart, true, 'a resolved command is still a command');
 });
 
@@ -28,7 +28,7 @@ test('every app keeps its own config folder inside the profile', () => {
   const { apps } = parseManifest(
     { apps: [{ name: 'mydota' }, { name: 'dota' }] },
     '/base',
-    profile(['mydota', 'dota']),
+    profile(['busybar-mydota', 'busybar-dota']),
   );
 
   assert.equal(apps[0]?.cwd, join(DIR, 'mydota'));
@@ -49,7 +49,7 @@ test('a checkout still wins, so both kinds of app live side by side', () => {
       ],
     },
     '/base',
-    profile(['mydota', 'dota']),
+    profile(['busybar-mydota', 'busybar-dota']),
   );
 
   assert.equal(apps[1]?.command, 'node', 'an explicit command is taken literally');
@@ -84,45 +84,9 @@ test('an app the profile has not installed is one you start yourself', () => {
   assert.equal(apps[0]?.cwd, join(DIR, 'chess'), 'but it still has a home for its .env');
 });
 
-test('windows gets the .cmd shim npm actually writes', () => {
-  const win = profile([join('busybar-dota.cmd')], 'win32');
-  const bins = new Set([join(DIR, 'node_modules', '.bin', 'busybar-dota.cmd')]);
-  const resolver = profileAt(DIR, {
-    platform: 'win32',
-    exists: (path) => bins.has(path),
-  });
-
-  assert.equal(
-    resolver.binFor('busybar-dota'),
-    join(DIR, 'node_modules', '.bin', 'busybar-dota.cmd'),
-  );
-  assert.equal(win.binFor('nothing'), undefined);
-});
-
 test('without a profile nothing is filled in, which is the old behaviour', () => {
   const { apps } = parseManifest({ apps: [{ name: 'mydota' }] }, '/base');
 
   assert.equal(apps[0]?.command, undefined);
   assert.equal(apps[0]?.cwd, undefined, 'and the app inherits the daemon working dir');
-});
-
-test('the package name is found from the application name it draws with', () => {
-  const { apps } = parseManifest(
-    { apps: [{ name: 'flights', rank: 15 }] },
-    '/base',
-    profile(['busybar-flights']),
-  );
-
-  assert.equal(apps[0]?.command, join(DIR, 'node_modules', '.bin', 'busybar-flights'));
-  assert.equal(apps[0]?.cwd, join(DIR, 'flights'), 'the folder keeps the short name');
-});
-
-test('a bin under the plain name is preferred to the prefixed one', () => {
-  const { apps } = parseManifest(
-    { apps: [{ name: 'chess' }] },
-    '/base',
-    profile(['chess', 'busybar-chess']),
-  );
-
-  assert.equal(apps[0]?.command, join(DIR, 'node_modules', '.bin', 'chess'));
 });

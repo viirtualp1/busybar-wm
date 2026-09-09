@@ -232,7 +232,6 @@ src/proxy/     the Bar, as far as an app is concerned — server and socket tunn
 src/wm/        registry (who wants the screen), arbiter (who gets it),
                compositor (making it so), supervisor (the processes)
 src/bar/       the one connection that reaches the hardware, and its input socket
-src/profile.ts where a setup lives when it is not a row of checkouts
 src/mock-bar.ts a BUSY Bar that is not a BUSY Bar
 ```
 

@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { errorMessage } from 'busybar-kit/errors';
 import { loadConfig, loadEnvFile } from './config.js';
 import { DEFAULT_CONFIG_FILES, loadManifest } from './manifest.js';
-import { ensureAppDirs, profileAt } from './profile.js';
+import { ensureAppDirs, profileAt } from 'busybar-kit/profile';
 import { Daemon } from './wm/daemon.js';
 
 loadEnvFile();

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import type { ProfileResolver } from './profile.js';
+import type { ProfileResolver } from 'busybar-kit/profile';
 
 /**
  * What the supervisor knows about one app, and all it needs to know.
