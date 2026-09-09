@@ -1,5 +1,14 @@
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { loadBarConfig, type BarConfig } from 'busybar-kit/config';
 import { DEFAULT_CONFIG_FILES } from './manifest.js';
+
+/** `~/.busybar` is how anyone would write it down, so it has to work. */
+export function expandHome(path: string): string {
+  return path === '~' || path.startsWith('~/') || path.startsWith('~\\')
+    ? join(homedir(), path.slice(1))
+    : path;
+}
 
 export { loadEnvFile } from 'busybar-kit/config';
 
@@ -27,6 +36,12 @@ const LIMITS = {
 export type Config = {
   bar: BarConfig;
   manifestPath: string;
+  /**
+   * A directory holding a whole setup: the manifest, the apps as installed
+   * packages, and a folder per app for its own `.env`. Null keeps the old
+   * behaviour, where every app is a checkout the manifest points at by path.
+   */
+  profile: string | null;
   host: string;
   port: number;
   minHoldMs: number;
@@ -44,16 +59,26 @@ export type Config = {
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
   manifestArg?: string,
+  profileArg?: string,
 ): { config: Config; warnings: string[] } {
   const warnings: string[] = [];
   const { bar, env: reader } = loadBarConfig(env, warnings);
   const { read, number } = reader;
+  const profile = profileArg || read('WM_PROFILE');
 
   return {
     warnings,
     config: {
       bar,
-      manifestPath: manifestArg || read('WM_CONFIG') || DEFAULT_CONFIG_FILES[0],
+      profile: profile ? resolve(expandHome(profile)) : null,
+      // Inside a profile the manifest lives there too, so `--profile` alone is
+      // a whole invocation.
+      manifestPath:
+        manifestArg ||
+        read('WM_CONFIG') ||
+        (profile
+          ? join(resolve(expandHome(profile)), DEFAULT_CONFIG_FILES[0])
+          : DEFAULT_CONFIG_FILES[0]),
       host: read('WM_HOST') || DEFAULTS.host,
       port: number('WM_PORT', DEFAULTS.port, LIMITS.port, true),
       minHoldMs: number('WM_MIN_HOLD_MS', DEFAULTS.minHoldMs, LIMITS.minHoldMs, true),

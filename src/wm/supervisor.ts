@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { AppManifest } from '../manifest.js';
 import type { Logger } from './compositor.js';
@@ -193,11 +193,10 @@ function spawnChild(
   args: string[],
   extra: { cwd?: string; env: NodeJS.ProcessEnv },
 ): ChildProcess {
-  const common = {
-    ...extra,
-    stdio: ['ignore', 'pipe', 'pipe'] as const,
-    windowsHide: true,
-  };
+  // Annotated rather than `as const`: a readonly tuple is not a `StdioOptions`,
+  // and the mismatch made every `spawn` overload below fail to resolve.
+  const stdio: StdioOptions = ['ignore', 'pipe', 'pipe'];
+  const common = { ...extra, stdio, windowsHide: true };
 
   if (process.platform !== 'win32') {
     // `npm start` is a shell that execs node; signalling the group is the

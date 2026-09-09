@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
+import type { ProfileResolver } from './profile.js';
 
 /**
  * What the supervisor knows about one app, and all it needs to know.
@@ -32,7 +33,11 @@ const DEFAULT_RANK = 10;
 /** Where `loadManifest` looks when nothing was named on the command line. */
 export const DEFAULT_CONFIG_FILES = ['wm.config.json', 'wm.json'] as const;
 
-export function loadManifest(path: string, cwd = process.cwd()): WmManifest {
+export function loadManifest(
+  path: string,
+  cwd = process.cwd(),
+  profile?: ProfileResolver,
+): WmManifest {
   const file = isAbsolute(path) ? path : resolve(cwd, path);
   let raw: unknown;
   try {
@@ -48,10 +53,14 @@ export function loadManifest(path: string, cwd = process.cwd()): WmManifest {
 
   // Paths in a manifest read as relative to the manifest, not to wherever the
   // daemon happened to be started from.
-  return parseManifest(raw, resolve(file, '..'));
+  return parseManifest(raw, resolve(file, '..'), profile);
 }
 
-export function parseManifest(raw: unknown, base: string): WmManifest {
+export function parseManifest(
+  raw: unknown,
+  base: string,
+  profile?: ProfileResolver,
+): WmManifest {
   if (!isRecord(raw)) {
     throw new Error('manifest must be a JSON object');
   }
@@ -59,7 +68,7 @@ export function parseManifest(raw: unknown, base: string): WmManifest {
     throw new Error('manifest needs an "apps" array');
   }
 
-  const apps = raw.apps.map((entry, index) => parseApp(entry, index, base));
+  const apps = raw.apps.map((entry, index) => parseApp(entry, index, base, profile));
   const seen = new Set<string>();
   for (const app of apps) {
     if (seen.has(app.name)) {
@@ -71,7 +80,12 @@ export function parseManifest(raw: unknown, base: string): WmManifest {
   return { apps };
 }
 
-function parseApp(raw: unknown, index: number, base: string): AppManifest {
+function parseApp(
+  raw: unknown,
+  index: number,
+  base: string,
+  profile?: ProfileResolver,
+): AppManifest {
   const at = `apps[${index}]`;
   if (!isRecord(raw)) {
     throw new Error(`${at} must be an object`);
@@ -100,8 +114,12 @@ function parseApp(raw: unknown, index: number, base: string): AppManifest {
     throw new Error(`${at}.env must be an object of strings`);
   }
 
-  const command = raw.command?.trim() ? raw.command : undefined;
-  const cwd = typeof raw.cwd === 'string' ? resolve(base, raw.cwd) : undefined;
+  const named = raw.command?.trim() ? raw.command.trim() : undefined;
+  // A profile supplies what the manifest left out: the bin an app package
+  // installed here, and the folder where that app keeps its own `.env`.
+  const command = resolveCommand(named, name.trim(), profile);
+  const cwd =
+    typeof raw.cwd === 'string' ? resolve(base, raw.cwd) : profile?.cwdFor(name.trim());
 
   if (raw.autostart === true && !command) {
     throw new Error(`${at}.autostart needs a command to start`);
@@ -119,6 +137,29 @@ function parseApp(raw: unknown, index: number, base: string): AppManifest {
     ...(command ? { command } : {}),
     ...(cwd ? { cwd } : {}),
   };
+}
+
+/**
+ * A manifest command wins, with one courtesy: a bare name is looked up in the
+ * profile's own `node_modules/.bin` first, because `busybar-dota` written in a
+ * profile's manifest means the package installed there, not whatever happens
+ * to be on PATH. Anything with a path separator is taken literally, and so is
+ * a bare name the profile does not provide.
+ */
+function resolveCommand(
+  named: string | undefined,
+  name: string,
+  profile?: ProfileResolver,
+): string | undefined {
+  if (!profile) {
+    return named;
+  }
+
+  if (!named) {
+    return profile.binFor(name);
+  }
+
+  return /[\\/]/.test(named) ? named : (profile.binFor(named) ?? named);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

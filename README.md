@@ -96,6 +96,72 @@ An app that draws under a name no manifest claims still gets to the screen — i
 joins unmanaged, at rank 0. Nothing starts or stops it, and it is judged stale
 `WM_STALE_MS` after its last draw, since no process here proves it is alive.
 
+## Profiles
+
+A manifest pointing at checkouts means every app is a repository you keep on
+disk, with its dev toolchain — six of those cost about half a gigabyte, of
+which the code is six megabytes. A **profile** is the other way round: one
+directory holding the whole setup, with the apps as installed packages.
+
+```
+~/.busybar/
+  package.json          the apps you chose, as dependencies
+  node_modules/         one copy, production dependencies only
+  wm.config.json
+  mydota/.env
+  dota/.env  dota/schedule.json
+  flights/.env  flights/flights.json
+```
+
+```bash
+busybar-wm --profile ~/.busybar        # or WM_PROFILE=~/.busybar
+```
+
+With a profile, a manifest entry can be nothing but a name and a rank:
+
+```json
+{
+  "apps": [
+    { "name": "mydota", "rank": 50 },
+    { "name": "flights", "rank": 15 }
+  ]
+}
+```
+
+- **`command`** becomes the bin that app's package installed here. The name is
+  the `application_name` the app draws with, so `busybar-mydota` is found from
+  `mydota` — and a bin under the plain name wins if there is one.
+- **`cwd`** becomes `<profile>/<name>/`, created on startup if missing. Every
+  app already reads its `.env` from its working directory, so a packaged app
+  finds its settings exactly where a checked-out one always did. Nothing inside
+  the apps changes.
+
+Both are only ever filled in. A manifest that names a `command` or a `cwd`
+keeps it, so a checkout you are working on sits in the same profile as the
+packages you are not:
+
+```json
+{
+  "apps": [
+    { "name": "flights", "rank": 15 },
+    {
+      "name": "mydota",
+      "rank": 50,
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "../busybar-mydota"
+    }
+  ]
+}
+```
+
+A bare `command` is looked up in the profile too, so `"command": "busybar-dota"`
+means the package installed here rather than whatever is on `PATH`. Anything
+with a path separator is taken literally.
+
+Without `--profile` or `WM_PROFILE` nothing is filled in and the manifest works
+exactly as it always did.
+
 ## Who gets the screen
 
 1. An app **pinned** by hand wins, until it stops drawing or the pin expires.
@@ -140,13 +206,14 @@ daemon speaks the wire protocol itself and needs no client at runtime.
 
 Everything is in [.env.example](.env.example). The ones worth knowing:
 
-|                       |                                                               |
-| --------------------- | ------------------------------------------------------------- |
-| `WM_PORT`             | Where the apps think the Bar is. Default `4111`.              |
-| `WM_MIN_HOLD_MS`      | Shortest a frame may stay against an equal rank.              |
-| `WM_PIN_MS`           | How long an OK-button choice sticks. `0` keeps it until BACK. |
-| `WM_STALE_MS`         | How long an unsupervised app is believed after its last draw. |
-| `WM_INPUT`, `WM_KNOB` | The Bar's buttons and knob.                                   |
+|                       |                                                                 |
+| --------------------- | --------------------------------------------------------------- |
+| `WM_PORT`             | Where the apps think the Bar is. Default `4111`.                |
+| `WM_MIN_HOLD_MS`      | Shortest a frame may stay against an equal rank.                |
+| `WM_PIN_MS`           | How long an OK-button choice sticks. `0` keeps it until BACK.   |
+| `WM_STALE_MS`         | How long an unsupervised app is believed after its last draw.   |
+| `WM_INPUT`, `WM_KNOB` | The Bar's buttons and knob.                                     |
+| `WM_PROFILE`          | A directory holding the whole setup. See [Profiles](#profiles). |
 
 ## Known edges
 
@@ -165,6 +232,7 @@ src/proxy/     the Bar, as far as an app is concerned — server and socket tunn
 src/wm/        registry (who wants the screen), arbiter (who gets it),
                compositor (making it so), supervisor (the processes)
 src/bar/       the one connection that reaches the hardware, and its input socket
+src/profile.ts where a setup lives when it is not a row of checkouts
 src/mock-bar.ts a BUSY Bar that is not a BUSY Bar
 ```
 
