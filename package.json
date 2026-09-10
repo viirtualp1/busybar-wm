@@ -38,6 +38,7 @@
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -52,7 +53,7 @@
   },
   "dependencies": {
     "@busybar/wm-api": "file:../busybar-config-gui/packages/server",
-    "busybar-deck": "^1.0.0",
+    "busybar-deck": "^1.1.0",
     "busybar-kit": "^2.0.0"
   },
   "devDependencies": {

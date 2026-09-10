@@ -105,6 +105,10 @@ export class Daemon {
             restart: (name: string) => this.supervisor.restart(name),
             setPin: (name: string) => this.compositor.pinApp(name),
             clearPin: () => this.compositor.unpin(),
+            // The deck has no credentials of its own, and a browser cannot put
+            // headers on an `<img>` — so the frame is fetched here, where the
+            // one connection to the hardware already lives.
+            screen: (display: 0 | 1) => this.upstream.screen(display),
           },
         },
       });

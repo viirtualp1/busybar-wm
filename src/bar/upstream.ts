@@ -72,6 +72,36 @@ export class Upstream {
   }
 
   /**
+   * A photograph of a panel, as the device renders it. Front is 0, back is 1.
+   *
+   * Not JSON, so it does not go through `request`. What comes back is base64
+   * text under a `image/bmp` content type the device does not honour — there is
+   * no BMP header, just raw pixels once decoded — so it is passed on as the
+   * text it is, and `busybar-kit/screen` knows how to read it.
+   */
+  async screen(display: 0 | 1): Promise<{ body: string; contentType: string }> {
+    await this.ensureVersion();
+
+    const response = await fetch(this.url('/screen', { display: String(display) }), {
+      headers: this.headers(),
+      signal: AbortSignal.timeout(this.options.timeoutMs ?? 10_000),
+    });
+
+    if (!response.ok) {
+      throw new BarApiError(
+        `BUSY Bar responded ${response.status} for the ${display === 0 ? 'front' : 'back'} screen`,
+        response.status,
+        undefined,
+      );
+    }
+
+    return {
+      body: await response.text(),
+      contentType: response.headers.get('content-type') ?? 'image/bmp',
+    };
+  }
+
+  /**
    * The device rejects a request carrying the wrong `X-API-Sem-Ver` with a 405,
    * so the version is fetched lazily and refreshed once on that answer — the
    * same dance busy-lib's middleware does.
