@@ -3,12 +3,15 @@ import { createInterface } from 'node:readline';
 import type { AppManifest } from '../manifest.js';
 import type { Logger } from './compositor.js';
 import type { Registry } from './registry.js';
+import { Strays } from './strays.js';
 
 export type SupervisorOptions = {
   /** What the children get as `BUSY_ADDR` — this daemon, not the device. */
   proxyAddr: string;
   registry: Registry;
   restartDelayMs: number;
+  /** Where the note about running children is kept between runs. */
+  stateDir?: string;
   logger?: Logger;
 };
 
@@ -33,7 +36,9 @@ const STOP_GRACE_MS = 3000;
  */
 export class Supervisor {
   private readonly children = new Map<string, Child>();
+  private readonly skipAutoRestart = new Set<string>();
   private readonly logger: Logger;
+  private readonly strays: Strays;
   private running = false;
 
   constructor(
@@ -41,6 +46,7 @@ export class Supervisor {
     private readonly options: SupervisorOptions,
   ) {
     this.logger = options.logger ?? console;
+    this.strays = new Strays(options.stateDir ?? process.cwd());
     for (const manifest of manifests) {
       if (manifest.command) {
         this.children.set(manifest.name, {
@@ -55,6 +61,14 @@ export class Supervisor {
 
   start(): void {
     this.running = true;
+    // Anything a previous daemon left running still holds its ports and still
+    // draws; starting a second copy on top of it is how 3080 ends up taken.
+    for (const stray of this.strays.sweep()) {
+      this.logger.warn(
+        `[wm] stopped a stray ${stray.name} (pid ${stray.pid}) from a previous run`,
+      );
+    }
+
     for (const child of this.children.values()) {
       if (child.manifest.autostart) {
         this.spawn(child);
@@ -66,6 +80,28 @@ export class Supervisor {
     this.running = false;
     const stopping = [...this.children.values()].map((child) => this.kill(child));
     await Promise.all(stopping);
+    this.strays.clear();
+  }
+
+  /** Kill and start again — used by the /wm config API after a settings change. */
+  async restart(name: string): Promise<void> {
+    const child = this.children.get(name);
+    if (!child) {
+      throw new Error(`no supervised app named ${name}`);
+    }
+    if (child.timer) {
+      clearTimeout(child.timer);
+      child.timer = null;
+    }
+    child.failures = 0;
+    if (child.process) {
+      this.skipAutoRestart.add(name);
+      await this.kill(child);
+      this.skipAutoRestart.delete(name);
+    }
+    if (this.running) {
+      this.spawn(child);
+    }
   }
 
   private spawn(child: Child): void {
@@ -90,6 +126,9 @@ export class Supervisor {
     child.process = proc;
     this.options.registry.setRunning(manifest.name, true);
     this.logger.info(`[wm] started ${manifest.name} (pid ${proc.pid ?? '?'})`);
+    if (proc.pid) {
+      this.strays.remember(proc.pid, manifest.name);
+    }
 
     this.relay(manifest.name, proc);
 
@@ -99,6 +138,9 @@ export class Supervisor {
 
     proc.on('exit', (code, signal) => {
       child.process = null;
+      if (proc.pid) {
+        this.strays.forget(proc.pid);
+      }
       this.options.registry.setRunning(manifest.name, false);
       const how = signal ? `signal ${signal}` : `code ${code ?? 0}`;
       this.logger.info(`[wm] ${manifest.name} exited (${how})`);
@@ -107,7 +149,12 @@ export class Supervisor {
   }
 
   private scheduleRestart(child: Child, clean: boolean): void {
-    if (!this.running || !child.manifest.restart || child.timer) {
+    if (
+      !this.running ||
+      !child.manifest.restart ||
+      child.timer ||
+      this.skipAutoRestart.has(child.manifest.name)
+    ) {
       return;
     }
 

@@ -18,6 +18,12 @@ export type ProxyOptions = {
   upstream: Upstream;
   registry: Registry;
   logger?: Logger;
+  /**
+   * Local `/wm` config API + UI. Checked before device pass-through; must never
+   * be forwarded to the Bar.
+   */
+  /** The deck answers `/deck` before anything is forwarded to the device. */
+  deck?: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 };
 
 /** The API prefixes the Bar mounts itself under, local and cloud. */
@@ -83,6 +89,11 @@ export class ProxyServer {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://proxy.invalid');
+
+    if (this.options.deck && (await this.options.deck(req, res))) {
+      return;
+    }
+
     const route = strip(url.pathname);
 
     if (route === DRAW_PATH && req.method === 'POST') {

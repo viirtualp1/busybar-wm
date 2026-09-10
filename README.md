@@ -217,13 +217,34 @@ Everything is in [.env.example](.env.example). The ones worth knowing:
 
 ## Known edges
 
-- **A clear that names no application is ignored.** Under the window manager an
-  app only speaks for itself, and a global clear would take the screen from
-  whoever holds it.
+- **A clear that names no application is ignored — from an app.** Under the
+  window manager an app only speaks for itself, and a global clear from one of
+  them would take the screen from whoever holds it. The daemon does sweep the
+  display once on startup, which is a different thing: see below.
 - **Apps keep polling while off screen.** They are whole processes and they do
   not know they are hidden, so a background app goes on asking Steam or Stratz
   for updates. Ranking is not rate limiting.
 - **`WM_KNOB=1` fights any app that uses the knob.** See above.
+
+## Two things that pile up, and no longer do
+
+**Elements the Bar was never told to forget.** They persist on the device by id,
+under the name of whoever drew them, and a clear only ever names one app — so an
+app that died without cleaning up, or one from a previous run of this daemon,
+left its elements there for as long as the Bar stayed up. Enough of those and a
+draw comes back `508 Resource Limit Reached`, which is not even a documented
+answer for `/display/draw`. The daemon now sweeps the display once on startup,
+before it begins arbitrating: nothing of ours is legitimately on screen at that
+moment, which is what makes an unnamed clear right there and wrong everywhere
+else. It touches only what the API drew, not the Bar's own apps.
+
+**Apps that outlived the daemon.** Kill the daemon hard — close the terminal,
+crash it — and the apps it started keep running: holding their ports, so the
+next `busybar-mydota` cannot bind 3080 and crash-loops instead, and drawing into
+a screen they no longer own. Every child is now written to `children.json` in
+the profile as it starts, and the next daemon reads that note and clears up
+before it spawns anything. A note older than the machine's own uptime is
+ignored, because by then the pid belongs to somebody else.
 
 ## Layout
 

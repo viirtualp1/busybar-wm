@@ -1,3 +1,4 @@
+import { mountDeck, type Mounted } from 'busybar-deck';
 import { errorMessage, isForbidden } from 'busybar-kit/errors';
 import { BarInput, type InputEvent } from '../bar/input.js';
 import { Upstream } from '../bar/upstream.js';
@@ -30,6 +31,7 @@ export class Daemon {
   private readonly proxy: ProxyServer;
   private readonly supervisor: Supervisor;
   private readonly logger: Logger;
+  private deck: Mounted | null = null;
   private input: BarInput | null = null;
   private running = false;
 
@@ -64,18 +66,52 @@ export class Daemon {
       upstream: this.upstream,
       registry: this.registry,
       logger: this.logger,
+      deck: (req, res) => this.deck?.handle(req, res) ?? Promise.resolve(false),
     });
 
     this.supervisor = new Supervisor(manifest.apps, {
       proxyAddr: `http://${config.host}:${config.port}`,
       registry: this.registry,
       restartDelayMs: config.restartDelayMs,
+      // Beside the manifest, so each profile keeps its own note of what it
+      // started — and a second profile does not adopt the first one's strays.
+      stateDir: config.profile ?? process.cwd(),
       logger: this.logger,
     });
   }
 
   async start(): Promise<void> {
     this.running = true;
+
+    if (this.deps.config.profile) {
+      this.deck = mountDeck({
+        profileDir: this.deps.config.profile,
+        host: this.deps.config.host,
+        ...(process.env['WM_API_TOKEN'] ? { token: process.env['WM_API_TOKEN'] } : {}),
+        manifestApps: this.deps.manifest.apps.map((app) => ({
+          name: app.name,
+          rank: app.rank,
+          autostart: app.autostart,
+          ...(app.command ? { command: app.command } : {}),
+        })),
+        // Mounted here, the deck has the answers only this process holds; run
+        // on its own it reports that it does not, rather than guessing.
+        live: {
+          status: { connected: true },
+          state: {
+            running: (name: string) => this.registry.get(name)?.running ?? false,
+            onScreen: () => this.compositor.showing,
+            pin: () => this.compositor.pin,
+            restart: (name: string) => this.supervisor.restart(name),
+            setPin: (name: string) => this.compositor.pinApp(name),
+            clearPin: () => this.compositor.unpin(),
+          },
+        },
+      });
+      this.logger.info(
+        `[wm] deck at http://${this.deps.config.host}:${this.deps.config.port}/deck/`,
+      );
+    }
 
     await this.proxy.listen();
     this.logger.info(
@@ -87,9 +123,31 @@ export class Daemon {
       return;
     }
 
+    await this.sweep();
+
     this.compositor.start();
     this.supervisor.start();
     this.attachInput();
+  }
+
+  /**
+   * Everything the API has ever drawn, wiped once before we start arbitrating.
+   *
+   * Elements persist on the device by id, under the name of whoever drew them,
+   * and a clear only ever names one app. So an app that died without cleaning
+   * up, or one from a previous run of this daemon, leaves its elements behind
+   * for as long as the Bar stays up — and they pile up until a draw comes back
+   * `508 Resource Limit Reached`. Nothing of ours is legitimately on screen at
+   * this moment, which is what makes the unnamed clear safe here and nowhere
+   * else. It touches only what the API drew, not the Bar's own apps.
+   */
+  private async sweep(): Promise<void> {
+    try {
+      await this.upstream.clear();
+      this.logger.info('[wm] display swept — anything left over from before is gone');
+    } catch (error) {
+      this.logger.warn(`[wm] could not sweep the display: ${errorMessage(error)}`);
+    }
   }
 
   async stop(): Promise<void> {
@@ -98,14 +156,11 @@ export class Daemon {
     }
     this.running = false;
     this.input?.stop();
-    // Apps first: one of them drawing into a half-torn-down proxy is noise in
-    // the log at best.
     await this.supervisor.stop();
     await this.compositor.stop();
     await this.proxy.close();
   }
 
-  /** Nothing is worth starting until the Bar answers. */
   private async connect(): Promise<void> {
     while (this.running) {
       try {
@@ -126,12 +181,6 @@ export class Daemon {
     }
   }
 
-  /**
-   * OK steps through the apps that have something to show, BACK gives the
-   * choice back to the policy. The knob is left alone by default: apps bind it
-   * themselves — busybar-nowplaying makes it the system volume — and taking it
-   * away at this level would break them.
-   */
   private attachInput(): void {
     if (!this.deps.config.input) {
       return;

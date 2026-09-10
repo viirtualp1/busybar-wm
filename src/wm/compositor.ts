@@ -98,6 +98,14 @@ export class Compositor {
     return target;
   }
 
+  /** Same as OK landing on one app — used by the /wm config API. */
+  pinApp(name: string, now = Date.now()): void {
+    this.pinned = name;
+    this.pinnedAt = now;
+    this.logger.info(`[wm] pinned ${name}`);
+    this.wake();
+  }
+
   /** BACK: give the choice back to the policy. */
   unpin(): void {
     if (!this.pinned) {

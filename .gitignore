@@ -5,3 +5,4 @@ dist/
 !docs/*.png
 probe-art-*
 .DS_Store
+children.json
