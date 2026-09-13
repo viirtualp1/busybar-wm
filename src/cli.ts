@@ -40,7 +40,13 @@ console.log(
   `Apps: ${manifest.apps.map((app) => `${app.name}(${app.rank})`).join(', ') || 'none yet'}`,
 );
 
-const daemon = new Daemon({ config, manifest });
+const daemon = new Daemon({
+  config,
+  manifest,
+  // The deck installs apps into the profile while this runs, and writes them
+  // into the same file; reading it again is how they get started.
+  reloadManifest: () => loadManifest(path, process.cwd(), profile),
+});
 
 let exiting = false;
 async function shutdown(code: number): Promise<void> {

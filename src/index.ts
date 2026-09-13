@@ -1,7 +1,7 @@
 export { Daemon, type DaemonDeps } from './wm/daemon.js';
 export { Compositor, type CompositorOptions, type Logger } from './wm/compositor.js';
 export { Registry, type AppState, type DrawPayload } from './wm/registry.js';
-export { Supervisor, type SupervisorOptions } from './wm/supervisor.js';
+export { Supervisor, type AppHealth, type SupervisorOptions } from './wm/supervisor.js';
 export {
   decide,
   cycleOrder,

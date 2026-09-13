@@ -32,6 +32,21 @@ test('drawing is the request for the screen, and a DELETE is the release', () =>
   assert.deepEqual(registry.candidates(200), []);
 });
 
+test('an app added later joins with its rank, and a stranger keeps its frame', () => {
+  const registry = new Registry([], { staleMs: 60_000 });
+  registry.draw({ application_name: 'late', elements: [{ id: 'x' }] }, 100);
+  assert.equal(registry.get('late')?.rank, UNMANAGED_RANK);
+
+  registry.add(manifest('late', { rank: 70 }));
+
+  assert.equal(registry.get('late')?.rank, 70);
+  assert.equal(registry.get('late')?.managed, true);
+  assert.deepEqual(registry.get('late')?.frame?.elements, [{ id: 'x' }]);
+
+  registry.add(manifest('fresh', { rank: 30 }));
+  assert.equal(registry.get('fresh')?.running, false);
+});
+
 test('the last frame is kept, because an app off screen will not resend it', () => {
   const registry = new Registry([manifest('dota')], { staleMs: 1000 });
   registry.setRunning('dota', true);

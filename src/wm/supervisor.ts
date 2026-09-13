@@ -15,15 +15,42 @@ export type SupervisorOptions = {
   logger?: Logger;
 };
 
+/**
+ * Why an app is or is not running, in words a person can act on.
+ *
+ * Kept as plain data because it travels: the deck puts it above the app's
+ * settings, where "offline" alone would leave you reading the terminal to find
+ * out whether the app crashed, is waiting its turn, or was never started.
+ */
+export type AppHealth = {
+  state: 'running' | 'waiting' | 'restarting' | 'exited' | 'broken' | 'unmanaged';
+  message: string;
+  /** When it started, or when it last stopped. */
+  since?: number;
+  /** When the next attempt is due, while one is scheduled. */
+  restartAt?: number;
+  exitCode?: number | null;
+  signal?: string | null;
+  /** The last lines it printed — usually where the reason actually is. */
+  output: string[];
+};
+
 type Child = {
   manifest: AppManifest;
   process: ChildProcess | null;
   timer: NodeJS.Timeout | null;
   failures: number;
+  startedAt: number;
+  restartAt: number;
+  exit: { code: number | null; signal: string | null; at: number } | null;
+  error: string | null;
+  output: string[];
 };
 
 const MAX_BACKOFF = 8;
 const STOP_GRACE_MS = 3000;
+/** Enough to hold a stack trace's first lines, not a whole log. */
+const OUTPUT_LINES = 12;
 
 /**
  * Runs the apps.
@@ -48,14 +75,7 @@ export class Supervisor {
     this.logger = options.logger ?? console;
     this.strays = new Strays(options.stateDir ?? process.cwd());
     for (const manifest of manifests) {
-      if (manifest.command) {
-        this.children.set(manifest.name, {
-          manifest,
-          process: null,
-          timer: null,
-          failures: 0,
-        });
-      }
+      this.track(manifest);
     }
   }
 
@@ -86,6 +106,24 @@ export class Supervisor {
     this.strays.settle();
   }
 
+  /**
+   * Takes on an app that was added while the daemon runs.
+   *
+   * False when there is nothing to take on: no command to run, or an app of
+   * that name is already supervised.
+   */
+  add(manifest: AppManifest): boolean {
+    if (!this.track(manifest)) {
+      return false;
+    }
+    const child = this.children.get(manifest.name);
+    if (child && this.running && manifest.autostart) {
+      this.spawn(child);
+    }
+
+    return true;
+  }
+
   /** Kill and start again — used by the /wm config API after a settings change. */
   async restart(name: string): Promise<void> {
     const child = this.children.get(name);
@@ -107,11 +145,89 @@ export class Supervisor {
     }
   }
 
+  /** Undefined for an app this supervisor does not run. */
+  health(name: string): AppHealth | undefined {
+    const child = this.children.get(name);
+    if (!child) {
+      return undefined;
+    }
+    const output = [...child.output];
+
+    if (child.process) {
+      return { state: 'running', message: 'Running', since: child.startedAt, output };
+    }
+
+    const exit = child.exit
+      ? { since: child.exit.at, exitCode: child.exit.code, signal: child.exit.signal }
+      : {};
+    const why = child.error ? `Could not start: ${child.error}` : exitMessage(child);
+
+    if (child.timer) {
+      return {
+        state: 'restarting',
+        message: `${why} — trying again`,
+        restartAt: child.restartAt,
+        ...exit,
+        output,
+      };
+    }
+    if (child.error) {
+      return { state: 'broken', message: why, output };
+    }
+    if (child.exit) {
+      return {
+        state: 'exited',
+        message: child.manifest.restart
+          ? why
+          : `${why}. It is set not to restart, so it stays stopped`,
+        ...exit,
+        output,
+      };
+    }
+    if (!child.manifest.autostart) {
+      return {
+        state: 'waiting',
+        message: 'Autostart is off in wm.config.json, so it only runs when started',
+        output,
+      };
+    }
+
+    return {
+      state: 'waiting',
+      message: 'Not started yet — apps start once the Bar answers',
+      output,
+    };
+  }
+
+  private track(manifest: AppManifest): boolean {
+    if (!manifest.command || this.children.has(manifest.name)) {
+      return false;
+    }
+    this.children.set(manifest.name, {
+      manifest,
+      process: null,
+      timer: null,
+      failures: 0,
+      startedAt: 0,
+      restartAt: 0,
+      exit: null,
+      error: null,
+      output: [],
+    });
+
+    return true;
+  }
+
   private spawn(child: Child): void {
     const { manifest } = child;
     if (!manifest.command || child.process) {
       return;
     }
+
+    // What the last run said is only interesting until the next run speaks.
+    child.output = [];
+    child.error = null;
+    child.exit = null;
 
     let proc: ChildProcess;
     try {
@@ -121,29 +237,42 @@ export class Supervisor {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      child.error = message;
       this.logger.warn(`[${manifest.name}] failed to start: ${message}`);
       this.scheduleRestart(child, false);
       return;
     }
 
     child.process = proc;
+    child.startedAt = Date.now();
     this.options.registry.setRunning(manifest.name, true);
     this.logger.info(`[wm] started ${manifest.name} (pid ${proc.pid ?? '?'})`);
     if (proc.pid) {
       this.strays.remember(proc.pid, manifest.name);
     }
 
-    this.relay(manifest.name, proc);
+    this.relay(child, proc);
 
     proc.on('error', (error) => {
+      child.error = error.message;
       this.logger.warn(`[${manifest.name}] failed to start: ${error.message}`);
+      // A command that does not exist never gets a pid, and never exits
+      // either — without this it would count as running forever.
+      if (!proc.pid && child.process === proc) {
+        child.process = null;
+        this.options.registry.setRunning(manifest.name, false);
+        this.scheduleRestart(child, false);
+      }
     });
 
     proc.on('exit', (code, signal) => {
-      child.process = null;
+      if (child.process === proc) {
+        child.process = null;
+      }
       if (proc.pid) {
         this.strays.forget(proc.pid);
       }
+      child.exit = { code, signal, at: Date.now() };
       this.options.registry.setRunning(manifest.name, false);
       const how = signal ? `signal ${signal}` : `code ${code ?? 0}`;
       this.logger.info(`[wm] ${manifest.name} exited (${how})`);
@@ -165,6 +294,7 @@ export class Supervisor {
     // immediately is how you get a fork bomb with a nice log.
     child.failures = clean ? 1 : Math.min(child.failures + 1, MAX_BACKOFF);
     const delay = this.options.restartDelayMs * 2 ** (child.failures - 1);
+    child.restartAt = Date.now() + delay;
     child.timer = setTimeout(() => {
       child.timer = null;
       this.spawn(child);
@@ -239,19 +369,42 @@ export class Supervisor {
     };
   }
 
-  /** App output, tagged, so one terminal can follow five apps. */
-  private relay(name: string, proc: ChildProcess): void {
+  /**
+   * App output, tagged, so one terminal can follow five apps — and the last few
+   * lines kept, because that is where a crash explains itself.
+   */
+  private relay(child: Child, proc: ChildProcess): void {
+    const { name } = child.manifest;
     for (const stream of [proc.stdout, proc.stderr]) {
       if (!stream) {
         continue;
       }
       createInterface({ input: stream }).on('line', (line) => {
-        if (line.trim()) {
-          this.logger.info(`[${name}] ${line}`);
+        if (!line.trim()) {
+          return;
+        }
+        this.logger.info(`[${name}] ${line}`);
+        child.output.push(line);
+        if (child.output.length > OUTPUT_LINES) {
+          child.output.shift();
         }
       });
     }
   }
+}
+
+function exitMessage(child: Child): string {
+  const exit = child.exit;
+  if (!exit) {
+    return 'Stopped';
+  }
+  if (exit.signal) {
+    return `Stopped by ${exit.signal}`;
+  }
+
+  return exit.code === 0
+    ? 'Exited on its own'
+    : `Crashed with exit code ${exit.code ?? '?'}`;
 }
 
 function spawnChild(

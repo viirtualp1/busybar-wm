@@ -96,6 +96,85 @@ test('an app that was not given a command is left alone', async () => {
   await supervisor.stop();
 });
 
+function supervised(app: AppManifest, restartDelayMs = 100) {
+  const registry = new Registry([app], { staleMs: 1000 });
+  const supervisor = new Supervisor([app], {
+    proxyAddr: 'http://127.0.0.1:4999',
+    registry,
+    restartDelayMs,
+    logger: quiet,
+  });
+
+  return { registry, supervisor };
+}
+
+test('a crash says how it ended, and what the app said on the way out', async () => {
+  const { supervisor } = supervised(
+    manifest({ args: ['-e', "console.error('no token in .env'); process.exit(3)"] }),
+  );
+
+  await supervisor.start();
+  try {
+    await until('the app to exit', () => supervisor.health('fake')?.state === 'exited');
+    const health = supervisor.health('fake');
+
+    assert.equal(health?.exitCode, 3);
+    assert.match(health?.message ?? '', /exit code 3/);
+    assert.ok(health?.output.includes('no token in .env'), health?.output.join('|'));
+  } finally {
+    await supervisor.stop();
+  }
+});
+
+test('a crash that will be retried says when', async () => {
+  const { supervisor } = supervised(
+    manifest({ args: ['-e', 'process.exit(1)'], restart: true }),
+    60_000,
+  );
+
+  await supervisor.start();
+  try {
+    await until(
+      'a retry to be scheduled',
+      () => supervisor.health('fake')?.state === 'restarting',
+    );
+    assert.ok((supervisor.health('fake')?.restartAt ?? 0) > Date.now());
+  } finally {
+    await supervisor.stop();
+  }
+});
+
+test('an app with autostart off is waiting, and says it is by choice', async () => {
+  const { supervisor } = supervised(manifest({ autostart: false }));
+
+  await supervisor.start();
+  assert.equal(supervisor.health('fake')?.state, 'waiting');
+  assert.match(supervisor.health('fake')?.message ?? '', /Autostart is off/);
+  await supervisor.stop();
+});
+
+test('an app added while running is started without touching the others', async () => {
+  const registry = new Registry([], { staleMs: 1000 });
+  const supervisor = new Supervisor([], {
+    proxyAddr: 'http://127.0.0.1:4999',
+    registry,
+    restartDelayMs: 100,
+    logger: quiet,
+  });
+
+  await supervisor.start();
+  try {
+    const app = manifest({ name: 'late' });
+    registry.add(app);
+    assert.equal(supervisor.add(app), true);
+    assert.equal(supervisor.add(app), false, 'a second add is not a second process');
+
+    await until('the new app to come up', () => registry.get('late')?.running === true);
+  } finally {
+    await supervisor.stop();
+  }
+});
+
 test('npm as a command is spawnable', async () => {
   const lines: string[] = [];
   const npm = manifest({

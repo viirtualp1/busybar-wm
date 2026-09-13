@@ -3,15 +3,20 @@ import { errorMessage, isForbidden } from 'busybar-kit/errors';
 import { BarInput, type InputEvent } from '../bar/input.js';
 import { Upstream } from '../bar/upstream.js';
 import type { Config } from '../config.js';
-import type { WmManifest } from '../manifest.js';
+import type { AppManifest, WmManifest } from '../manifest.js';
 import { ProxyServer } from '../proxy/server.js';
 import { Compositor, type Logger } from './compositor.js';
 import { Registry } from './registry.js';
-import { Supervisor } from './supervisor.js';
+import { Supervisor, type AppHealth } from './supervisor.js';
 
 export type DaemonDeps = {
   config: Config;
   manifest: WmManifest;
+  /**
+   * Reads the manifest again, for an app added while the daemon runs. Left
+   * out, the daemon only ever runs the apps it started with.
+   */
+  reloadManifest?: () => WmManifest;
   logger?: Logger;
 };
 
@@ -34,10 +39,13 @@ export class Daemon {
   private deck: Mounted | null = null;
   private input: BarInput | null = null;
   private running = false;
+  /** The manifest as it stands now, including apps added since startup. */
+  private readonly apps: AppManifest[];
 
   constructor(private readonly deps: DaemonDeps) {
     const { config, manifest } = deps;
     this.logger = deps.logger ?? console;
+    this.apps = [...manifest.apps];
 
     this.upstream = new Upstream({
       addr: config.bar.busyAddr,
@@ -88,12 +96,13 @@ export class Daemon {
         profileDir: this.deps.config.profile,
         host: this.deps.config.host,
         ...(process.env['WM_API_TOKEN'] ? { token: process.env['WM_API_TOKEN'] } : {}),
-        manifestApps: this.deps.manifest.apps.map((app) => ({
-          name: app.name,
-          rank: app.rank,
-          autostart: app.autostart,
-          ...(app.command ? { command: app.command } : {}),
-        })),
+        manifestApps: () =>
+          this.apps.map((app) => ({
+            name: app.name,
+            rank: app.rank,
+            autostart: app.autostart,
+            ...(app.command ? { command: app.command } : {}),
+          })),
         // Mounted here, the deck has the answers only this process holds; run
         // on its own it reports that it does not, rather than guessing.
         live: {
@@ -109,6 +118,8 @@ export class Daemon {
             // headers on an `<img>` — so the frame is fetched here, where the
             // one connection to the hardware already lives.
             screen: (display: 0 | 1) => this.upstream.screen(display),
+            health: (name: string) => this.health(name),
+            addApp: (name: string) => this.addApp(name),
           },
         },
       });
@@ -152,6 +163,53 @@ export class Daemon {
     } catch (error) {
       this.logger.warn(`[wm] could not sweep the display: ${errorMessage(error)}`);
     }
+  }
+
+  /**
+   * Why an app is where it is. The supervisor answers for what it runs; an app
+   * the manifest lists but nothing can start gets its reason from here.
+   */
+  health(name: string): AppHealth | null {
+    const known = this.supervisor.health(name);
+    if (known) {
+      return known;
+    }
+    if (!this.apps.some((app) => app.name === name)) {
+      return null;
+    }
+
+    return {
+      state: 'unmanaged',
+      message: this.deps.config.profile
+        ? `busybar-${name} is not installed in this profile, and the manifest names no command, so there is nothing to start`
+        : 'The manifest names no command for it, so the window manager does not start it',
+      output: [],
+    };
+  }
+
+  /**
+   * Takes on an app that was just written into the manifest, without a
+   * restart. Everything else keeps running; only the newcomer starts.
+   */
+  addApp(name: string): void {
+    const reload = this.deps.reloadManifest;
+    if (!reload) {
+      throw new Error(
+        'this daemon cannot re-read its manifest; restart it to pick up the app',
+      );
+    }
+    const app = reload().apps.find((candidate) => candidate.name === name);
+    if (!app) {
+      throw new Error(`${name} is not in the manifest`);
+    }
+    if (this.apps.some((existing) => existing.name === name)) {
+      return;
+    }
+
+    this.apps.push(app);
+    this.registry.add(app);
+    this.supervisor.add(app);
+    this.logger.info(`[wm] added ${name} (rank ${app.rank})`);
   }
 
   async stop(): Promise<void> {

@@ -55,18 +55,26 @@ export class Registry {
     private readonly options: RegistryOptions,
   ) {
     for (const manifest of manifests) {
-      this.apps.set(manifest.name, {
-        name: manifest.name,
-        rank: manifest.rank,
-        managed: Boolean(manifest.command),
-        running: false,
-        frame: null,
-        frameKey: '',
-        priority: DEFAULT_PRIORITY,
-        lastDrawAt: 0,
-        yieldedAt: 0,
-      });
+      this.apps.set(manifest.name, fresh(manifest));
     }
+  }
+
+  /**
+   * An app written into the manifest while the daemon runs.
+   *
+   * One that already drew as a stranger keeps its frame and gains the rank it
+   * was given, so installing an app that is already running by hand does not
+   * blank it.
+   */
+  add(manifest: AppManifest): void {
+    const existing = this.apps.get(manifest.name);
+    if (existing) {
+      existing.rank = manifest.rank;
+      existing.managed = Boolean(manifest.command);
+    } else {
+      this.apps.set(manifest.name, fresh(manifest));
+    }
+    this.options.onChange?.();
   }
 
   all(): AppState[] {
@@ -140,19 +148,23 @@ export class Registry {
       return existing;
     }
 
-    const app: AppState = {
-      name,
-      rank: UNMANAGED_RANK,
-      managed: false,
-      running: false,
-      frame: null,
-      frameKey: '',
-      priority: DEFAULT_PRIORITY,
-      lastDrawAt: 0,
-      yieldedAt: 0,
-    };
+    const app = fresh({ name, rank: UNMANAGED_RANK });
     this.apps.set(name, app);
 
     return app;
   }
+}
+
+function fresh(manifest: Pick<AppManifest, 'name' | 'rank' | 'command'>): AppState {
+  return {
+    name: manifest.name,
+    rank: manifest.rank,
+    managed: Boolean(manifest.command),
+    running: false,
+    frame: null,
+    frameKey: '',
+    priority: DEFAULT_PRIORITY,
+    lastDrawAt: 0,
+    yieldedAt: 0,
+  };
 }
