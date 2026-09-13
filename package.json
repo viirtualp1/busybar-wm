@@ -53,7 +53,7 @@
   },
   "dependencies": {
     "busybar-deck": "^1.2.0",
-    "busybar-kit": "^2.0.0"
+    "busybar-kit": "^2.3.0"
   },
   "devDependencies": {
     "@busy-app/busy-lib": "^0.18.0",

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -31,6 +31,8 @@ function tracker(dir: string, living: number[] = []) {
     bootedMsAgo: () => UP_FOR,
     alive: (pid) => living.includes(pid),
     kill: (pid) => killed.push(pid),
+    // The doubles never actually die, so waiting for them would only add time.
+    waitMs: 0,
   });
 
   return { strays, killed };
@@ -67,46 +69,94 @@ test('a child that exits is forgotten rather than hunted next time', () => {
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'children.json'), 'utf8')), []);
 });
 
-test('a stray still holding its port is stopped before anything else starts', () => {
+test('a stray still holding its port is stopped before anything else starts', async () => {
   const dir = scratch();
   note(dir, [{ pid: 4242, name: 'mydota' }]);
   const { strays, killed } = tracker(dir, [4242]);
 
-  const stopped = strays.sweep();
+  const stopped = await strays.sweep();
 
   assert.deepEqual(killed, [4242]);
   assert.equal(stopped[0]?.name, 'mydota');
 });
 
-test('a pid that is no longer running is left alone', () => {
+test('a pid that is no longer running is left alone', async () => {
   const dir = scratch();
   note(dir, [{ pid: 4242, name: 'mydota' }]);
   const { strays, killed } = tracker(dir, []);
 
-  assert.deepEqual(strays.sweep(), []);
+  assert.deepEqual(await strays.sweep(), []);
   assert.deepEqual(killed, []);
 });
 
-test('a note from before this machine booted is not trusted', () => {
+test('a note from before this machine booted is not trusted', async () => {
   const dir = scratch();
   // The pid may well be alive — as something else entirely.
   note(dir, [{ pid: 4242, name: 'mydota', startedAt: NOW - UP_FOR - 1000 }]);
   const { strays, killed } = tracker(dir, [4242]);
 
-  assert.deepEqual(strays.sweep(), [], 'a recycled pid is somebody else');
+  assert.deepEqual(await strays.sweep(), [], 'a recycled pid is somebody else');
   assert.deepEqual(killed, []);
 });
 
-test('the note is emptied once it has been acted on', () => {
+test('the note is emptied once it has been acted on', async () => {
   const dir = scratch();
   note(dir, [{ pid: 4242, name: 'mydota' }]);
   const { strays } = tracker(dir, [4242]);
 
-  strays.sweep();
+  await strays.sweep();
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'children.json'), 'utf8')), []);
 });
 
-test('a clean shutdown leaves nothing to sweep', () => {
+test('the sweep waits for a stray to be gone before letting anything start', async () => {
+  const dir = scratch();
+  note(dir, [{ pid: 4242, name: 'mydota' }]);
+  // Alive for the first few looks, as a process is while taskkill gets to it.
+  let looks = 0;
+  const strays = new Strays(dir, {
+    now: () => NOW,
+    bootedMsAgo: () => UP_FOR,
+    alive: () => {
+      looks += 1;
+
+      return looks < 4;
+    },
+    kill: () => undefined,
+    waitMs: 5000,
+  });
+
+  await strays.sweep();
+
+  assert.ok(looks >= 4, 'it kept looking until the process had let go');
+});
+
+test('an orderly stop forgets the children that really went', () => {
+  const dir = scratch();
+  const { strays } = tracker(dir, []);
+
+  strays.remember(4242, 'mydota');
+  strays.settle();
+
+  assert.equal(existsSync(join(dir, 'children.json')), false);
+});
+
+test('a child that outlived its kill stays in the note, for the next start to clear', async () => {
+  // This is the Ctrl+C case: the shell under the daemon died, the app beneath
+  // it did not, and the old stop deleted the note anyway.
+  const dir = scratch();
+  const { strays } = tracker(dir, [4242]);
+
+  strays.remember(4242, 'mydota');
+  strays.settle();
+
+  const next = tracker(dir, [4242]);
+  const stopped = await next.strays.sweep();
+
+  assert.deepEqual(next.killed, [4242]);
+  assert.equal(stopped[0]?.name, 'mydota');
+});
+
+test('a clean shutdown leaves nothing to sweep', async () => {
   const dir = scratch();
   const { strays, killed } = tracker(dir, [4242]);
 
@@ -114,19 +164,23 @@ test('a clean shutdown leaves nothing to sweep', () => {
   strays.clear();
 
   assert.deepEqual(
-    new Strays(dir, { alive: () => true, kill: () => undefined }).sweep(),
+    await new Strays(dir, {
+      alive: () => true,
+      kill: () => undefined,
+      waitMs: 0,
+    }).sweep(),
     [],
   );
   assert.deepEqual(killed, []);
 });
 
-test('a corrupt or missing note is not a reason to fail a start', () => {
+test('a corrupt or missing note is not a reason to fail a start', async () => {
   const dir = scratch();
-  assert.deepEqual(tracker(dir).strays.sweep(), [], 'nothing written yet');
+  assert.deepEqual(await tracker(dir).strays.sweep(), [], 'nothing written yet');
 
   writeFileSync(join(dir, 'children.json'), '{not json');
-  assert.deepEqual(tracker(dir).strays.sweep(), []);
+  assert.deepEqual(await tracker(dir).strays.sweep(), []);
 
   writeFileSync(join(dir, 'children.json'), '[{"pid":"nope"}]');
-  assert.deepEqual(tracker(dir).strays.sweep(), []);
+  assert.deepEqual(await tracker(dir).strays.sweep(), []);
 });

@@ -43,7 +43,7 @@ test('a supervised app is pointed at the proxy, not at the Bar', async () => {
     logger: { info: (line) => lines.push(line), warn: () => undefined },
   });
 
-  supervisor.start();
+  await supervisor.start();
   try {
     await until('the app to report its address', () =>
       lines.some((line) => line.includes('http://127.0.0.1:4999')),
@@ -65,7 +65,7 @@ test('a process that is gone is showing nothing, whatever it drew last', async (
     logger: quiet,
   });
 
-  supervisor.start();
+  await supervisor.start();
   await until('the app to come up', () => registry.get('fake')?.running === true);
   registry.draw({ application_name: 'fake', elements: [] });
   assert.equal(registry.candidates().length, 1);
@@ -91,7 +91,7 @@ test('an app that was not given a command is left alone', async () => {
     logger: quiet,
   });
 
-  supervisor.start();
+  await supervisor.start();
   assert.equal(registry.get('fake')?.running, false);
   await supervisor.stop();
 });
@@ -114,7 +114,7 @@ test('npm as a command is spawnable', async () => {
     },
   });
 
-  supervisor.start();
+  await supervisor.start();
   try {
     await until('npm to print a version', () =>
       lines.some((line) => /\d+\.\d+\.\d+/.test(line)),

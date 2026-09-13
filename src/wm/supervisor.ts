@@ -59,11 +59,11 @@ export class Supervisor {
     }
   }
 
-  start(): void {
+  async start(): Promise<void> {
     this.running = true;
     // Anything a previous daemon left running still holds its ports and still
     // draws; starting a second copy on top of it is how 3080 ends up taken.
-    for (const stray of this.strays.sweep()) {
+    for (const stray of await this.strays.sweep()) {
       this.logger.warn(
         `[wm] stopped a stray ${stray.name} (pid ${stray.pid}) from a previous run`,
       );
@@ -80,7 +80,10 @@ export class Supervisor {
     this.running = false;
     const stopping = [...this.children.values()].map((child) => this.kill(child));
     await Promise.all(stopping);
-    this.strays.clear();
+    // Only what is really gone is forgotten. A child that outlived its kill
+    // stays in the note, so the next start clears it up instead of colliding
+    // with it on its port.
+    this.strays.settle();
   }
 
   /** Kill and start again — used by the /wm config API after a settings change. */
@@ -183,27 +186,43 @@ export class Supervisor {
     }
 
     const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()));
-    this.signal(proc.pid, 'SIGTERM');
-    const timer = setTimeout(() => this.signal(proc.pid ?? 0, 'SIGKILL'), STOP_GRACE_MS);
-    await exited;
+    await this.signal(proc.pid, 'SIGTERM');
+    const timer = setTimeout(
+      () => void this.signal(proc.pid ?? 0, 'SIGKILL'),
+      STOP_GRACE_MS,
+    );
+    // Bounded: a child that will not exit must not keep the daemon from
+    // stopping. The note still has it, and the next start sweeps it.
+    await Promise.race([
+      exited,
+      new Promise<void>((resolve) => setTimeout(resolve, STOP_GRACE_MS * 2).unref()),
+    ]);
     clearTimeout(timer);
   }
 
-  private signal(pid: number, signal: NodeJS.Signals): void {
+  private signal(pid: number, signal: NodeJS.Signals): Promise<void> {
+    if (process.platform === 'win32') {
+      // Negative pids are a Unix process-group trick; on Windows the tree is
+      // taskkill /t, and /f is SIGKILL. It is awaited: returning before
+      // taskkill has run let the daemon exit first, and then nothing did.
+      return new Promise((resolve) => {
+        const taskkill = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        taskkill.once('exit', () => resolve());
+        taskkill.once('error', () => resolve());
+      });
+    }
+
     try {
-      if (process.platform === 'win32') {
-        // Negative pids are a Unix process-group trick; on Windows the tree
-        // is `taskkill /t`. `/f` is SIGKILL. Without it, console apps often
-        // ignore the request and the grace period expires into a force-kill.
-        const args = ['/pid', String(pid), '/t', '/f'];
-        spawn('taskkill', args, { stdio: 'ignore', windowsHide: true });
-        return;
-      }
-      // Negative pid is the process group, which `detached` gave the child.
+      // Negative pid is the process group, which detached gave the child.
       process.kill(-pid, signal);
     } catch {
       // Already gone, or never had a group; either way there is nothing to stop.
     }
+
+    return Promise.resolve();
   }
 
   private childEnv(manifest: AppManifest): NodeJS.ProcessEnv {

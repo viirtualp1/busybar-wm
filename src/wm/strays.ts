@@ -19,13 +19,17 @@ export type StrayNote = { pid: number; name: string; startedAt: number };
 export type StraysOptions = {
   /** Injected by the tests, which have no processes to kill. */
   alive?: (pid: number) => boolean;
-  kill?: (pid: number) => void;
+  kill?: (pid: number) => unknown;
   now?: () => number;
   /** How long this machine has been up, in ms. */
   bootedMsAgo?: () => number;
+  /** How long a stopped stray is given to actually let go of its port. */
+  waitMs?: number;
 };
 
 const FILE = 'children.json';
+const POLL_MS = 100;
+const DEFAULT_WAIT_MS = 5000;
 
 export class Strays {
   private readonly path: string;
@@ -39,11 +43,12 @@ export class Strays {
       kill: options.kill ?? killTree,
       now: options.now ?? (() => Date.now()),
       bootedMsAgo: options.bootedMsAgo ?? (() => uptime() * 1000),
+      waitMs: options.waitMs ?? DEFAULT_WAIT_MS,
     };
   }
 
   /** Stops whatever the last run left behind, and says what it stopped. */
-  sweep(): StrayNote[] {
+  async sweep(): Promise<StrayNote[]> {
     const bootedAt = this.options.now() - this.options.bootedMsAgo();
     const stopped: StrayNote[] = [];
 
@@ -54,9 +59,15 @@ export class Strays {
       if (note.startedAt < bootedAt || !this.options.alive(note.pid)) {
         continue;
       }
-      this.options.kill(note.pid);
+      await this.options.kill(note.pid);
       stopped.push(note);
     }
+
+    // A killed process is not yet a closed port. Starting the replacement the
+    // moment taskkill returns is the other way to find 3080 still taken, so the
+    // sweep waits for the strays to be gone — bounded, because one that will
+    // not die should not keep the whole daemon from starting.
+    await this.waitGone(stopped.map((note) => note.pid));
 
     this.notes.clear();
     this.write();
@@ -75,13 +86,45 @@ export class Strays {
     }
   }
 
-  /** A clean shutdown has nothing to leave behind. */
+  /**
+   * What an orderly stop leaves behind: a note of the children still alive.
+   *
+   * Deleting the note outright on the way out assumed every kill had worked.
+   * When one had not — a shell that died before the app beneath it, a taskkill
+   * that never reached — the survivor went unrecorded, and the next start had
+   * nothing to sweep and collided with it instead.
+   */
+  settle(): void {
+    for (const pid of [...this.notes.keys()]) {
+      if (!this.options.alive(pid)) {
+        this.notes.delete(pid);
+      }
+    }
+
+    if (this.notes.size === 0) {
+      this.clear();
+
+      return;
+    }
+    this.write();
+  }
+
+  /** Forgets everything, whatever state it is in. */
   clear(): void {
     this.notes.clear();
     try {
       rmSync(this.path, { force: true });
     } catch {
       // Nothing there, or nothing to be done about it.
+    }
+  }
+
+  private async waitGone(pids: number[]): Promise<void> {
+    // The real clock, not the injected one: a frozen test clock would never
+    // reach the deadline.
+    const deadline = Date.now() + this.options.waitMs;
+    while (pids.some((pid) => this.options.alive(pid)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     }
   }
 
@@ -132,17 +175,26 @@ function alive(pid: number): boolean {
   }
 }
 
-function killTree(pid: number): void {
-  try {
-    if (process.platform === 'win32') {
-      // The app is a grandchild of the shim we spawned, so the tree has to go.
-      spawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
+/**
+ * Stops a process and everything under it, and resolves once that is done.
+ *
+ * On Windows that is taskkill, which is a process of its own: returning before
+ * it has run lets the caller carry on — or exit — while the kill is still only
+ * an intention.
+ */
+function killTree(pid: number): Promise<void> {
+  if (process.platform === 'win32') {
+    return new Promise((resolve) => {
+      const taskkill = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
         stdio: 'ignore',
         windowsHide: true,
       });
+      taskkill.once('exit', () => resolve());
+      taskkill.once('error', () => resolve());
+    });
+  }
 
-      return;
-    }
+  try {
     process.kill(-pid, 'SIGKILL');
   } catch {
     try {
@@ -151,4 +203,6 @@ function killTree(pid: number): void {
       // Already gone.
     }
   }
+
+  return Promise.resolve();
 }

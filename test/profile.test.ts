@@ -90,3 +90,43 @@ test('without a profile nothing is filled in, which is the old behaviour', () =>
   assert.equal(apps[0]?.command, undefined);
   assert.equal(apps[0]?.cwd, undefined, 'and the app inherits the daemon working dir');
 });
+
+/** A Windows profile whose packages say which script their bin runs. */
+function packaged(files: Record<string, unknown>) {
+  const shim = join(DIR, 'node_modules', '.bin', 'busybar-mydota.cmd');
+
+  return profileAt(DIR, {
+    platform: 'win32',
+    exists: (path) => path === shim,
+    readJson: (path) => files[path],
+  });
+}
+
+test('a profile package runs as node on its script, with no shell in between', () => {
+  const { apps } = parseManifest(
+    { apps: [{ name: 'mydota', args: ['--demo'] }] },
+    '/base',
+    packaged({
+      [join(DIR, 'node_modules', 'busybar-mydota', 'package.json')]: {
+        bin: { 'busybar-mydota': 'dist/index.js' },
+      },
+    }),
+  );
+
+  assert.equal(
+    apps[0]?.command,
+    process.execPath,
+    'the pid held is the app, not cmd.exe',
+  );
+  assert.deepEqual(apps[0]?.args, [
+    join(DIR, 'node_modules', 'busybar-mydota', 'dist', 'index.js'),
+    '--demo',
+  ]);
+});
+
+test('a package that does not name its script still runs, through its shim', () => {
+  const { apps } = parseManifest({ apps: [{ name: 'mydota' }] }, '/base', packaged({}));
+
+  assert.equal(apps[0]?.command, join(DIR, 'node_modules', '.bin', 'busybar-mydota.cmd'));
+  assert.deepEqual(apps[0]?.args, []);
+});

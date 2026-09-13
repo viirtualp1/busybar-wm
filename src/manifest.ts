@@ -115,9 +115,10 @@ function parseApp(
   }
 
   const named = raw.command?.trim() ? raw.command.trim() : undefined;
-  // A profile supplies what the manifest left out: the bin an app package
-  // installed here, and the folder where that app keeps its own `.env`.
-  const command = resolveCommand(named, name.trim(), profile);
+  // A profile supplies what the manifest left out: the app package installed
+  // here, and the folder where that app keeps its own `.env`.
+  const launch = resolveLaunch(named, name.trim(), profile);
+  const command = launch?.command;
   const cwd =
     typeof raw.cwd === 'string' ? resolve(base, raw.cwd) : profile?.cwdFor(name.trim());
 
@@ -128,7 +129,7 @@ function parseApp(
   return {
     name: name.trim(),
     rank,
-    args: raw.args ?? [],
+    args: [...(launch?.prefix ?? []), ...(raw.args ?? [])],
     env: raw.env ?? {},
     // Supervising an app means starting it; a manifest that names a command
     // and says nothing else means "yes, run this".
@@ -139,27 +140,47 @@ function parseApp(
   };
 }
 
+type Launch = { command: string; prefix: string[] };
+
 /**
  * A manifest command wins, with one courtesy: a bare name is looked up in the
- * profile's own `node_modules/.bin` first, because `busybar-dota` written in a
- * profile's manifest means the package installed there, not whatever happens
- * to be on PATH. Anything with a path separator is taken literally, and so is
- * a bare name the profile does not provide.
+ * profile first, because busybar-dota written in a profile's manifest means the
+ * package installed there, not whatever happens to be on PATH. Anything with a
+ * path separator is taken literally, and so is a bare name the profile does not
+ * provide.
+ *
+ * A package found in the profile is started as node on its bin script rather
+ * than through the bin. On Windows that bin is a .cmd shim, a shim needs a
+ * shell, and a shell in between makes the supervised pid cmd.exe: stopping it
+ * does not reliably stop the app underneath, which then keeps its port. The
+ * script is exactly what the shim runs. The shim is still used for a package
+ * that does not say which script its bin is.
  */
-function resolveCommand(
+function resolveLaunch(
   named: string | undefined,
   name: string,
   profile?: ProfileResolver,
-): string | undefined {
+): Launch | undefined {
   if (!profile) {
-    return named;
+    return named ? { command: named, prefix: [] } : undefined;
   }
 
-  if (!named) {
-    return profile.binFor(name);
+  if (named && /[\\/]/.test(named)) {
+    return { command: named, prefix: [] };
   }
 
-  return /[\\/]/.test(named) ? named : (profile.binFor(named) ?? named);
+  const wanted = named ?? name;
+  const entry = profile.entryFor(wanted);
+  if (entry) {
+    return { command: process.execPath, prefix: [entry] };
+  }
+
+  const bin = profile.binFor(wanted);
+  if (bin) {
+    return { command: bin, prefix: [] };
+  }
+
+  return named ? { command: named, prefix: [] } : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

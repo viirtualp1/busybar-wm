@@ -130,7 +130,7 @@ export class Daemon {
     await this.sweep();
 
     this.compositor.start();
-    this.supervisor.start();
+    await this.supervisor.start();
     this.attachInput();
   }
 
