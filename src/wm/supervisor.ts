@@ -23,7 +23,8 @@ export type SupervisorOptions = {
  * out whether the app crashed, is waiting its turn, or was never started.
  */
 export type AppHealth = {
-  state: 'running' | 'waiting' | 'restarting' | 'exited' | 'broken' | 'unmanaged';
+  state:
+    'running' | 'waiting' | 'restarting' | 'exited' | 'stopped' | 'broken' | 'unmanaged';
   message: string;
   /** When it started, or when it last stopped. */
   since?: number;
@@ -64,6 +65,8 @@ const OUTPUT_LINES = 12;
 export class Supervisor {
   private readonly children = new Map<string, Child>();
   private readonly skipAutoRestart = new Set<string>();
+  /** Stopped by hand: no restart, however they exit, until started by hand. */
+  private readonly held = new Set<string>();
   private readonly logger: Logger;
   private readonly strays: Strays;
   private running = false;
@@ -124,12 +127,42 @@ export class Supervisor {
     return true;
   }
 
+  /**
+   * Stops an app by hand. It stays stopped — no restart, however it exits —
+   * until it is started by hand again.
+   */
+  async stopApp(name: string): Promise<void> {
+    const child = this.children.get(name);
+    if (!child) {
+      throw new Error(`no supervised app named ${name}`);
+    }
+    this.held.add(name);
+    await this.kill(child);
+    this.logger.info(`[wm] stopped ${name} by hand`);
+  }
+
+  /** Stops an app and forgets it, because it has left the manifest. */
+  async remove(name: string): Promise<boolean> {
+    const child = this.children.get(name);
+    if (!child) {
+      return false;
+    }
+    this.held.add(name);
+    await this.kill(child);
+    this.children.delete(name);
+    this.held.delete(name);
+
+    return true;
+  }
+
   /** Kill and start again — used by the /wm config API after a settings change. */
   async restart(name: string): Promise<void> {
     const child = this.children.get(name);
     if (!child) {
       throw new Error(`no supervised app named ${name}`);
     }
+    // Starting by hand is what undoes stopping by hand.
+    this.held.delete(name);
     if (child.timer) {
       clearTimeout(child.timer);
       child.timer = null;
@@ -155,6 +188,15 @@ export class Supervisor {
 
     if (child.process) {
       return { state: 'running', message: 'Running', since: child.startedAt, output };
+    }
+
+    if (this.held.has(name)) {
+      return {
+        state: 'stopped',
+        message: 'Stopped by hand — it stays off until you start it',
+        ...(child.exit ? { since: child.exit.at } : {}),
+        output,
+      };
     }
 
     const exit = child.exit
@@ -285,7 +327,8 @@ export class Supervisor {
       !this.running ||
       !child.manifest.restart ||
       child.timer ||
-      this.skipAutoRestart.has(child.manifest.name)
+      this.skipAutoRestart.has(child.manifest.name) ||
+      this.held.has(child.manifest.name)
     ) {
       return;
     }

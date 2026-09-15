@@ -120,6 +120,9 @@ export class Daemon {
             screen: (display: 0 | 1) => this.upstream.screen(display),
             health: (name: string) => this.health(name),
             addApp: (name: string) => this.addApp(name),
+            stop: (name: string) => this.supervisor.stopApp(name),
+            removeApp: (name: string) => this.removeApp(name),
+            setRanks: (ranks: Record<string, number>) => this.setRanks(ranks),
           },
         },
       });
@@ -198,7 +201,8 @@ export class Daemon {
         'this daemon cannot re-read its manifest; restart it to pick up the app',
       );
     }
-    const app = reload().apps.find((candidate) => candidate.name === name);
+    const manifest = reload();
+    const app = manifest.apps.find((candidate) => candidate.name === name);
     if (!app) {
       throw new Error(`${name} is not in the manifest`);
     }
@@ -209,7 +213,40 @@ export class Daemon {
     this.apps.push(app);
     this.registry.add(app);
     this.supervisor.add(app);
-    this.logger.info(`[wm] added ${name} (rank ${app.rank})`);
+    // Ranks come from places in the list, and the list just grew: everyone
+    // else's rank moves with it, or the newcomer would tie with the last app.
+    this.setRanks(
+      Object.fromEntries(manifest.apps.map((entry) => [entry.name, entry.rank])),
+    );
+    this.logger.info(`[wm] added ${name}`);
+  }
+
+  /**
+   * Takes an app out: stops it, forgets it, and lets go of the screen if it
+   * was holding it. Its folder and settings are not this process's to touch.
+   */
+  async removeApp(name: string): Promise<void> {
+    await this.supervisor.remove(name);
+    const at = this.apps.findIndex((app) => app.name === name);
+    if (at !== -1) {
+      this.apps.splice(at, 1);
+    }
+    if (this.compositor.pin === name) {
+      this.compositor.unpin();
+    }
+    this.registry.remove(name);
+    this.logger.info(`[wm] removed ${name}`);
+  }
+
+  /** New ranks, applied at once: the very next decision already uses them. */
+  setRanks(ranks: Record<string, number>): void {
+    for (const app of this.apps) {
+      const rank = ranks[app.name];
+      if (typeof rank === 'number' && Number.isFinite(rank)) {
+        app.rank = rank;
+        this.registry.setRank(app.name, rank);
+      }
+    }
   }
 
   async stop(): Promise<void> {

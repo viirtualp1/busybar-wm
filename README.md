@@ -57,35 +57,40 @@ credentials they send are replaced on the way out.
 {
   "apps": [
     {
+      "name": "livesplit",
+      "cwd": "../busybar-livesplit",
+      "command": "npm",
+      "args": ["start"],
+      "autostart": false
+    },
+    {
       "name": "dota",
-      "rank": 40,
       "cwd": "../busybar-dota",
       "command": "npm",
       "args": ["start"]
     },
     {
       "name": "nowplaying",
-      "rank": 20,
       "cwd": "../busybar-nowplaying",
       "command": "npm",
       "args": ["start"]
-    },
-    {
-      "name": "livesplit",
-      "rank": 60,
-      "cwd": "../busybar-livesplit",
-      "command": "npm",
-      "args": ["start"],
-      "autostart": false
     }
   ]
 }
 ```
 
+**The order of the list is the priority.** The app listed first takes the
+screen over every app below it — so above, a running speedrun beats the match,
+and the match beats the music. There are no numbers to keep straight; drag an
+app in the deck, or move its entry in the file.
+
+A manifest from before this carries a `rank` on each app. It still works: the
+numbers are sorted on when the file is read, so it means what it always meant,
+and the deck writes it back as a plain order the first time it changes it.
+
 | Field                           |                             |                                                                                                                           |
 | ------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `name`                          | required                    | The `application_name` the app puts on its own draws. This is the only identity the Bar's API carries, so it is the join. |
-| `rank`                          | `10`                        | Higher takes the screen.                                                                                                  |
 | `command`, `args`, `cwd`, `env` | —                           | How to start it. Leave `command` out for an app you start yourself.                                                       |
 | `autostart`                     | true, if there is a command |                                                                                                                           |
 | `restart`                       | `true`                      | Restart on exit, backing off by doubling.                                                                                 |
@@ -93,7 +98,7 @@ credentials they send are replaced on the way out.
 Paths are relative to the manifest file, not to wherever you started the daemon.
 
 An app that draws under a name no manifest claims still gets to the screen — it
-joins unmanaged, at rank 0. Nothing starts or stops it, and it is judged stale
+joins unmanaged, below every app in the manifest. Nothing starts or stops it, and it is judged stale
 `WM_STALE_MS` after its last draw, since no process here proves it is alive.
 
 ## Profiles
@@ -117,14 +122,11 @@ directory holding the whole setup, with the apps as installed packages.
 busybar-wm --profile ~/.busybar        # or WM_PROFILE=~/.busybar
 ```
 
-With a profile, a manifest entry can be nothing but a name and a rank:
+With a profile, a manifest entry can be nothing but a name:
 
 ```json
 {
-  "apps": [
-    { "name": "mydota", "rank": 50 },
-    { "name": "flights", "rank": 15 }
-  ]
+  "apps": [{ "name": "mydota" }, { "name": "flights" }]
 }
 ```
 
@@ -143,14 +145,13 @@ packages you are not:
 ```json
 {
   "apps": [
-    { "name": "flights", "rank": 15 },
     {
       "name": "mydota",
-      "rank": 50,
       "command": "node",
       "args": ["dist/index.js"],
       "cwd": "../busybar-mydota"
-    }
+    },
+    { "name": "flights" }
   ]
 }
 ```
@@ -165,14 +166,15 @@ exactly as it always did.
 ## Who gets the screen
 
 1. An app **pinned** by hand wins, until it stops drawing or the pin expires.
-2. Otherwise the highest **rank** wins.
-3. Ties fall to the app's own **draw priority** — the `priority` on its frame,
-   which is how an app escalates itself without a config change.
-4. Then to whoever drew most recently.
+2. Otherwise the app listed **highest in the manifest** wins.
+3. Apps outside the manifest share the bottom place; between those, the app's
+   own **draw priority** — the `priority` on its frame — decides.
+4. Then whoever drew most recently.
 
-A frame stays for at least `WM_MIN_HOLD_MS` before an _equal_-ranked app can
-take over, so two apps that both redraw every 200ms do not trade the screen at
-200ms. A higher rank interrupts immediately — that is what rank is for.
+A frame stays for at least `WM_MIN_HOLD_MS` before an app in the _same_ place
+can take over, so two apps that both redraw every 200ms do not trade the screen
+at 200ms. An app higher in the list interrupts immediately — that is what the
+order is for.
 
 Only one app's elements are ever on the device. They persist there by id, so a
 handover clears the outgoing app before the incoming one draws.
@@ -209,7 +211,7 @@ Everything is in [.env.example](.env.example). The ones worth knowing:
 |                       |                                                                 |
 | --------------------- | --------------------------------------------------------------- |
 | `WM_PORT`             | Where the apps think the Bar is. Default `4111`.                |
-| `WM_MIN_HOLD_MS`      | Shortest a frame may stay against an equal rank.                |
+| `WM_MIN_HOLD_MS`      | Shortest a frame may stay against an app in the same place.     |
 | `WM_PIN_MS`           | How long an OK-button choice sticks. `0` keeps it until BACK.   |
 | `WM_STALE_MS`         | How long an unsupervised app is believed after its last draw.   |
 | `WM_INPUT`, `WM_KNOB` | The Bar's buttons and knob.                                     |

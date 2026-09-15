@@ -11,11 +11,50 @@ test('a command with nothing else said means "yes, run this"', () => {
 
   assert.equal(apps[0]?.autostart, true);
   assert.equal(apps[0]?.restart, true);
-  assert.equal(apps[0]?.rank, 10, 'and lands on the default rank');
+});
+
+test('the order of the list is the priority: the first listed goes first', () => {
+  const { apps } = parseManifest(
+    { apps: [{ name: 'livesplit' }, { name: 'mydota' }, { name: 'dota' }] },
+    '/base',
+  );
+
+  assert.deepEqual(
+    apps.map((app) => [app.name, app.rank]),
+    [
+      ['livesplit', 30],
+      ['mydota', 20],
+      ['dota', 10],
+    ],
+  );
+});
+
+test('a manifest still written with numbers keeps meaning what it meant', () => {
+  const { apps } = parseManifest(
+    {
+      apps: [
+        { name: 'flights', rank: 15 },
+        { name: 'livesplit', rank: 60 },
+        { name: 'dota' },
+        { name: 'mydota', rank: 50 },
+      ],
+    },
+    '/base',
+  );
+
+  assert.deepEqual(
+    apps.map((app) => app.name),
+    ['livesplit', 'mydota', 'flights', 'dota'],
+    'sorted on the numbers, and one without sits at the old default of 10',
+  );
+  assert.ok(
+    apps.every((app) => !('written' in app)),
+    'the number read is not passed on',
+  );
 });
 
 test('an app with no command is one you start yourself', () => {
-  const { apps } = parseManifest({ apps: [{ name: 'manual', rank: 5 }] }, '/base');
+  const { apps } = parseManifest({ apps: [{ name: 'manual' }] }, '/base');
 
   assert.equal(apps[0]?.command, undefined);
   assert.equal(apps[0]?.autostart, false);

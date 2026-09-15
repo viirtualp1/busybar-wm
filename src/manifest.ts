@@ -13,7 +13,10 @@ import type { ProfileResolver } from 'busybar-kit/profile';
  */
 export type AppManifest = {
   name: string;
-  /** Higher takes the screen. Ties fall through to the app's own draw priority. */
+  /**
+   * Higher takes the screen. Worked out from the app's place in the manifest —
+   * the first one listed is the highest — rather than written by hand.
+   */
   rank: number;
   /** Left out for an app that is started by hand rather than supervised. */
   command?: string;
@@ -68,7 +71,9 @@ export function parseManifest(
     throw new Error('manifest needs an "apps" array');
   }
 
-  const apps = raw.apps.map((entry, index) => parseApp(entry, index, base, profile));
+  const apps = byPlace(
+    raw.apps.map((entry, index) => parseApp(entry, index, base, profile)),
+  );
   const seen = new Set<string>();
   for (const app of apps) {
     if (seen.has(app.name)) {
@@ -85,7 +90,7 @@ function parseApp(
   index: number,
   base: string,
   profile?: ProfileResolver,
-): AppManifest {
+): AppManifest & { written?: number } {
   const at = `apps[${index}]`;
   if (!isRecord(raw)) {
     throw new Error(`${at} must be an object`);
@@ -96,9 +101,13 @@ function parseApp(
     throw new Error(`${at}.name must be the application_name the app draws with`);
   }
 
-  const rank = raw.rank ?? DEFAULT_RANK;
-  if (typeof rank !== 'number' || !Number.isFinite(rank)) {
-    throw new Error(`${at}.rank must be a number`);
+  // Only manifests written before order was the priority have one; see byPlace.
+  const written = raw.rank;
+  if (
+    written !== undefined &&
+    (typeof written !== 'number' || !Number.isFinite(written))
+  ) {
+    throw new Error(`${at}.rank must be a number — or better, left out`);
   }
 
   if (raw.command !== undefined && typeof raw.command !== 'string') {
@@ -128,7 +137,8 @@ function parseApp(
 
   return {
     name: name.trim(),
-    rank,
+    rank: 0,
+    ...(typeof written === 'number' ? { written } : {}),
     args: [...(launch?.prefix ?? []), ...(raw.args ?? [])],
     env: raw.env ?? {},
     // Supervising an app means starting it; a manifest that names a command
@@ -138,6 +148,33 @@ function parseApp(
     ...(command ? { command } : {}),
     ...(cwd ? { cwd } : {}),
   };
+}
+
+/**
+ * Priority is the order of the list: the first app listed takes the screen
+ * over the second, and so on down. Ranks are worked out from that, ten apart.
+ *
+ * A manifest written before carries a number on each app instead. Those still
+ * decide — sorted on first, so an old file means exactly what it always meant —
+ * and an app such a file left without one sits where the old default put it.
+ */
+function byPlace(apps: (AppManifest & { written?: number })[]): AppManifest[] {
+  const legacy = apps.some((app) => app.written !== undefined);
+  const ordered = legacy
+    ? [...apps].sort(
+        (left, right) => (right.written ?? DEFAULT_RANK) - (left.written ?? DEFAULT_RANK),
+      )
+    : apps;
+
+  return ordered.map((app, index) => {
+    const placed: AppManifest & { written?: number } = {
+      ...app,
+      rank: (ordered.length - index) * 10,
+    };
+    delete placed.written;
+
+    return placed;
+  });
 }
 
 type Launch = { command: string; prefix: string[] };

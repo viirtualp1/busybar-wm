@@ -175,6 +175,47 @@ test('an app added while running is started without touching the others', async 
   }
 });
 
+test('an app stopped by hand stays stopped, and says so', async () => {
+  const { registry, supervisor } = supervised(manifest({ restart: true }), 50);
+
+  await supervisor.start();
+  try {
+    await until('the app to come up', () => registry.get('fake')?.running === true);
+    await supervisor.stopApp('fake');
+    await until('the app to be down', () => registry.get('fake')?.running === false);
+    // Several restart delays' worth: long enough for one to have come.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.equal(registry.get('fake')?.running, false, 'no restart came for it');
+    assert.equal(supervisor.health('fake')?.state, 'stopped');
+
+    await supervisor.restart('fake');
+    await until(
+      'it to start again by hand',
+      () => registry.get('fake')?.running === true,
+    );
+    assert.equal(supervisor.health('fake')?.state, 'running');
+  } finally {
+    await supervisor.stop();
+  }
+});
+
+test('a removed app is stopped and forgotten', async () => {
+  const { registry, supervisor } = supervised(manifest({ restart: true }), 50);
+
+  await supervisor.start();
+  try {
+    await until('the app to come up', () => registry.get('fake')?.running === true);
+    assert.equal(await supervisor.remove('fake'), true);
+    await until('the app to be down', () => registry.get('fake')?.running === false);
+
+    assert.equal(supervisor.health('fake'), undefined);
+    assert.equal(await supervisor.remove('fake'), false, 'nothing left to remove');
+  } finally {
+    await supervisor.stop();
+  }
+});
+
 test('npm as a command is spawnable', async () => {
   const lines: string[] = [];
   const npm = manifest({

@@ -37,7 +37,7 @@ if (profile) {
 }
 
 console.log(
-  `Apps: ${manifest.apps.map((app) => `${app.name}(${app.rank})`).join(', ') || 'none yet'}`,
+  `Apps, first listed takes the screen first: ${manifest.apps.map((app) => app.name).join(', ') || 'none yet'}`,
 );
 
 const daemon = new Daemon({

@@ -32,6 +32,25 @@ test('drawing is the request for the screen, and a DELETE is the release', () =>
   assert.deepEqual(registry.candidates(200), []);
 });
 
+test('an app taken out is gone, and a new rank is a change once', () => {
+  let changes = 0;
+  const registry = new Registry([manifest('dota'), manifest('mydota', { rank: 50 })], {
+    staleMs: 1000,
+    onChange: () => {
+      changes += 1;
+    },
+  });
+
+  registry.setRank('dota', 90);
+  registry.setRank('dota', 90);
+  assert.equal(registry.get('dota')?.rank, 90);
+  assert.equal(changes, 1, 'the same rank again is not a change');
+
+  registry.remove('mydota');
+  assert.equal(registry.get('mydota'), undefined);
+  assert.equal(changes, 2);
+});
+
 test('an app added later joins with its rank, and a stranger keeps its frame', () => {
   const registry = new Registry([], { staleMs: 60_000 });
   registry.draw({ application_name: 'late', elements: [{ id: 'x' }] }, 100);

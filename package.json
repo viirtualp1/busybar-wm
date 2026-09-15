@@ -1,6 +1,6 @@
 {
   "name": "busybar-wm",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "A window manager for the BUSY Bar: one screen, many apps, arbitrated by a reverse proxy in front of the device",
   "author": "viirtualp1",
   "license": "MIT",
@@ -52,7 +52,7 @@
     "prepublishOnly": "npm run check && npm run build"
   },
   "dependencies": {
-    "busybar-deck": "^1.4.0",
+    "busybar-deck": "^1.5.0",
     "busybar-kit": "^2.3.0"
   },
   "devDependencies": {

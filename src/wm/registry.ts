@@ -77,6 +77,23 @@ export class Registry {
     this.options.onChange?.();
   }
 
+  /** An app taken out of the manifest. Whatever it last drew goes with it. */
+  remove(name: string): void {
+    if (this.apps.delete(name)) {
+      this.options.onChange?.();
+    }
+  }
+
+  /** A new place in the queue for the screen. */
+  setRank(name: string, rank: number): void {
+    const app = this.apps.get(name);
+    if (!app || app.rank === rank) {
+      return;
+    }
+    app.rank = rank;
+    this.options.onChange?.();
+  }
+
   all(): AppState[] {
     return [...this.apps.values()];
   }
