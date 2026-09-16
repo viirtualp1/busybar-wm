@@ -6,6 +6,11 @@ import type { Registry } from './registry.js';
 export type Logger = {
   info: (message: string) => void;
   warn: (message: string) => void;
+  /**
+   * A line an app printed. A logger without this gets it as `[name] line`
+   * through `info`, which is what every logger got before.
+   */
+  app?: (name: string, line: string, stream: 'out' | 'err') => void;
 };
 
 export type CompositorOptions = {

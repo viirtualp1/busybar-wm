@@ -418,7 +418,11 @@ export class Supervisor {
    */
   private relay(child: Child, proc: ChildProcess): void {
     const { name } = child.manifest;
-    for (const stream of [proc.stdout, proc.stderr]) {
+    const streams = [
+      [proc.stdout, 'out'],
+      [proc.stderr, 'err'],
+    ] as const;
+    for (const [stream, kind] of streams) {
       if (!stream) {
         continue;
       }
@@ -426,7 +430,11 @@ export class Supervisor {
         if (!line.trim()) {
           return;
         }
-        this.logger.info(`[${name}] ${line}`);
+        if (this.logger.app) {
+          this.logger.app(name, line, kind);
+        } else {
+          this.logger.info(`[${name}] ${line}`);
+        }
         child.output.push(line);
         if (child.output.length > OUTPUT_LINES) {
           child.output.shift();

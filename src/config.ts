@@ -54,6 +54,11 @@ export type Config = {
   input: boolean;
   /** Let the knob switch apps too — off, because apps use it themselves. */
   knob: boolean;
+  /**
+   * `normal` holds back app banners, apps' own Bar-connection chatter and
+   * repeated lines; `verbose` shows every line as it came.
+   */
+  log: 'normal' | 'verbose';
 };
 
 export function loadConfig(
@@ -99,6 +104,7 @@ export function loadConfig(
       ),
       input: read('WM_INPUT') !== '0',
       knob: read('WM_KNOB') === '1',
+      log: read('WM_LOG').toLowerCase() === 'verbose' ? 'verbose' : 'normal',
     },
   };
 }

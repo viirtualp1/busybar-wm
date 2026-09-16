@@ -216,6 +216,15 @@ Everything is in [.env.example](.env.example). The ones worth knowing:
 | `WM_STALE_MS`         | How long an unsupervised app is believed after its last draw.   |
 | `WM_INPUT`, `WM_KNOB` | The Bar's buttons and knob.                                     |
 | `WM_PROFILE`          | A directory holding the whole setup. See [Profiles](#profiles). |
+| `WM_LOG`              | `verbose` shows every line apps print. See below.               |
+
+The terminal shows one line per event: the time, who said it — each app in its
+own colour — and what. By default it holds back what several apps say over and
+over: their name on start, their news about reaching the Bar (under the window
+manager that is this process; the wm reports on the device itself), and any
+line that repeats. A repeated line is shown once, then at most every five
+minutes, with a count of how often it came round. `WM_LOG=verbose` shows it all.
+Colour is on in a terminal and off in a file or pipe; `NO_COLOR=1` turns it off.
 
 ## Known edges
 

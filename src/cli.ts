@@ -2,6 +2,7 @@
 import { existsSync } from 'node:fs';
 import { errorMessage } from 'busybar-kit/errors';
 import { loadConfig, loadEnvFile } from './config.js';
+import { ConsoleLog, shouldColor } from './log/console.js';
 import { DEFAULT_CONFIG_FILES, loadManifest } from './manifest.js';
 import { ensureAppDirs, profileAt } from 'busybar-kit/profile';
 import { Daemon } from './wm/daemon.js';
@@ -11,19 +12,25 @@ loadEnvFile();
 const { manifestArg, profileArg } = parseArgs(process.argv.slice(2));
 const { config, warnings } = loadConfig(process.env, manifestArg, profileArg);
 
-console.log('busybar-wm');
-for (const warning of warnings) {
-  console.warn(warning);
-}
+const log = new ConsoleLog({
+  color: shouldColor(process.stdout),
+  verbose: config.log === 'verbose',
+});
 
 const profile = config.profile ? profileAt(config.profile) : undefined;
-if (profile) {
-  console.log(`Profile: ${profile.dir}`);
-}
-
 const explicit = Boolean(manifestArg) || Boolean(config.profile);
 const path = resolveManifest(config.manifestPath, explicit);
 const manifest = loadManifest(path, process.cwd(), profile);
+
+log.reserve(['proxy', ...manifest.apps.map((app) => app.name)]);
+log.heading('busybar-wm', [
+  [profile ? 'profile' : 'manifest', profile ? profile.dir : path],
+  ['apps', manifest.apps.map((app) => app.name).join(' › ') || 'none yet'],
+]);
+
+for (const warning of warnings) {
+  log.warn(warning);
+}
 
 if (profile) {
   // Every app reads its `.env` from its working directory, so the folder has
@@ -32,17 +39,14 @@ if (profile) {
     profile,
     manifest.apps.map((app) => app.name),
   )) {
-    console.log(`Created ${dir} — put that app's .env there`);
+    log.info(`created ${dir} — put that app's .env there`);
   }
 }
-
-console.log(
-  `Apps, first listed takes the screen first: ${manifest.apps.map((app) => app.name).join(', ') || 'none yet'}`,
-);
 
 const daemon = new Daemon({
   config,
   manifest,
+  logger: log,
   // The deck installs apps into the profile while this runs, and writes them
   // into the same file; reading it again is how they get started.
   reloadManifest: () => loadManifest(path, process.cwd(), profile),
@@ -61,13 +65,13 @@ async function shutdown(code: number): Promise<void> {
 process.on('SIGINT', () => void shutdown(0));
 process.on('SIGTERM', () => void shutdown(0));
 process.on('unhandledRejection', (reason) => {
-  console.warn(`Unhandled rejection: ${errorMessage(reason)}`);
+  log.warn(`unhandled rejection: ${errorMessage(reason)}`);
 });
 
 try {
   await daemon.start();
 } catch (error) {
-  console.error(errorMessage(error));
+  log.error(errorMessage(error));
   await shutdown(1);
 }
 
