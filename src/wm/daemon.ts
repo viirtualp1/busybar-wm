@@ -74,6 +74,7 @@ export class Daemon {
       upstream: this.upstream,
       registry: this.registry,
       logger: this.logger,
+      timeoutMs: config.requestTimeoutMs,
       deck: (req, res) => this.deck?.handle(req, res) ?? Promise.resolve(false),
     });
 
@@ -261,6 +262,7 @@ export class Daemon {
   }
 
   private async connect(): Promise<void> {
+    let lastWarning = '';
     while (this.running) {
       try {
         await this.upstream.ping();
@@ -272,9 +274,13 @@ export class Daemon {
           isForbidden(error) && !this.deps.config.bar.isCloud
             ? ' — set BUSY_HTTP_PASSWORD to the HTTP Access password'
             : '';
-        this.logger.warn(
-          `[wm] waiting for BUSY Bar at ${this.deps.config.bar.busyAddr}: ${errorMessage(error)}${hint}`,
-        );
+        const warning = `[wm] waiting for BUSY Bar at ${this.deps.config.bar.busyAddr}: ${errorMessage(error)}${hint}`;
+        // The same line every two seconds says nothing new, and scrolls away
+        // whatever did.
+        if (warning !== lastWarning) {
+          this.logger.warn(warning);
+          lastWarning = warning;
+        }
         await new Promise((resolve) => setTimeout(resolve, CONNECT_RETRY_MS));
       }
     }

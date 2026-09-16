@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { after, before, test } from 'node:test';
 import { BusyBar } from '@busy-app/busy-lib';
 import { createMockBar, type MockBar } from '../src/mock-bar.js';
@@ -133,6 +134,55 @@ test('when the winner yields, the loser is replayed without being asked again', 
   await until('low back on screen', () => bar.showing() === 'low');
   // The frame it drew while off screen — the app was never told to redraw.
   assert.equal((bar.draws.at(-1)?.elements as { text: string }[])[0]?.text, 'and here');
+});
+
+test('a Bar that stops answering is given up on, and the app is told', async () => {
+  // Accepts the connection and never says a word, the way a hung device does.
+  const silent = createServer(() => undefined);
+  await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', resolve));
+  const address = silent.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+
+  const stuck = new ProxyServer({
+    host: '127.0.0.1',
+    port: 0,
+    upstream: new Upstream({ addr: `http://127.0.0.1:${port}` }),
+    registry: new Registry([], { staleMs: 1000 }),
+    logger: quiet,
+    timeoutMs: 150,
+  });
+  await stuck.listen();
+
+  try {
+    const started = Date.now();
+    const response = await fetch(`http://127.0.0.1:${stuck.port}/api/system/status`);
+
+    assert.equal(response.status, 504);
+    assert.ok(Date.now() - started < 2000, 'not left to the app’s own timeout');
+  } finally {
+    await stuck.close();
+    silent.closeAllConnections();
+    await new Promise<void>((resolve) => silent.close(() => resolve()));
+  }
+});
+
+test('an unreachable Bar is a 502 straight away', async () => {
+  const gone = new ProxyServer({
+    host: '127.0.0.1',
+    port: 0,
+    // Nothing listens on port 9 here.
+    upstream: new Upstream({ addr: 'http://127.0.0.1:9' }),
+    registry: new Registry([], { staleMs: 1000 }),
+    logger: quiet,
+  });
+  await gone.listen();
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${gone.port}/api/system/status`);
+    assert.equal(response.status, 502);
+  } finally {
+    await gone.close();
+  }
 });
 
 test('anything that is not a draw goes straight to the device', async () => {

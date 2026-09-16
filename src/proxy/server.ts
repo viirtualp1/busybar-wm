@@ -24,7 +24,21 @@ export type ProxyOptions = {
    */
   /** The deck answers `/deck` before anything is forwarded to the device. */
   deck?: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
+  /**
+   * How long a forwarded request may sit with no traffic before it is given
+   * up on. An idle limit rather than a total one, so a slow upload that keeps
+   * moving is left alone.
+   */
+  timeoutMs?: number;
 };
+
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+class UpstreamTimeout extends Error {
+  constructor() {
+    super('the Bar did not answer in time');
+  }
+}
 
 /** The API prefixes the Bar mounts itself under, local and cloud. */
 const PREFIXES = ['/api', '/busybar'];
@@ -153,7 +167,7 @@ export class ProxyServer {
   }
 
   private passThrough(req: IncomingMessage, res: ServerResponse, url: URL): void {
-    const proxied = this.open(req, url, (upstreamRes) => {
+    const proxied = this.open(req, res, url, (upstreamRes) => {
       res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
       upstreamRes.pipe(res);
     });
@@ -166,7 +180,7 @@ export class ProxyServer {
     url: URL,
     body: Buffer,
   ): void {
-    const proxied = this.open(req, url, (upstreamRes) => {
+    const proxied = this.open(req, res, url, (upstreamRes) => {
       res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
       upstreamRes.pipe(res);
     });
@@ -175,6 +189,7 @@ export class ProxyServer {
 
   private open(
     req: IncomingMessage,
+    res: ServerResponse,
     url: URL,
     onResponse: (res: IncomingMessage) => void,
   ) {
@@ -188,9 +203,32 @@ export class ProxyServer {
       },
       onResponse,
     );
+    // A Bar that stops answering would otherwise hold this request, and its
+    // socket, for as long as TCP cares to wait — one more for every retry.
+    proxied.setTimeout(this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS, () => {
+      proxied.destroy(new UpstreamTimeout());
+    });
+
     proxied.on('error', (error) => {
       this.logger.warn(`[proxy] ${target.pathname}: ${errorMessage(error)}`);
       proxied.destroy();
+      // The app is told, rather than left waiting out its own timeout.
+      if (res.headersSent) {
+        res.destroy();
+
+        return;
+      }
+      const timedOut = error instanceof UpstreamTimeout;
+      res.writeHead(timedOut ? 504 : 502, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: errorMessage(error) }));
+    });
+
+    // The app gave up first — its own timeout, or it exited. Nobody is left to
+    // read the answer, so the request to the Bar goes too.
+    res.on('close', () => {
+      if (!res.writableFinished) {
+        proxied.destroy();
+      }
     });
 
     return proxied;
