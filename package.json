@@ -1,6 +1,6 @@
 {
   "name": "busybar-wm",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "A window manager for the BUSY Bar: one screen, many apps, arbitrated by a reverse proxy in front of the device",
   "author": "viirtualp1",
   "license": "MIT",
