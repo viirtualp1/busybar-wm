@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { Upstream } from '../bar/upstream.js';
+import { PLACEHOLDER_CREDENTIAL } from '../wm/supervisor.js';
 
 /**
  * The status socket, passed through byte for byte.
@@ -78,6 +79,10 @@ export function stampCredential(target: URL, upstream: Upstream): void {
   const credential =
     upstream.headers()['x-api-token'] ?? upstream.headers()['authorization'];
   if (!credential) {
+    if (target.searchParams.get('x-api-token') === PLACEHOLDER_CREDENTIAL) {
+      target.searchParams.delete('x-api-token');
+    }
+
     return;
   }
   target.searchParams.set('x-api-token', credential.replace(/^Bearer /i, ''));

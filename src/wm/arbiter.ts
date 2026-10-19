@@ -1,7 +1,13 @@
-import type { AppState } from './registry.js';
+import type { ClientState, WantLevel } from './scene.js';
+
+/** What the policy reads of an app: everything else about it is not its business. */
+export type Contender = Pick<ClientState, 'name' | 'rank' | 'priority' | 'lastDrawAt'> & {
+  /** Absent means `normal`: an app behind the proxy wants the screen by drawing. */
+  want?: WantLevel;
+};
 
 export type ArbiterInput = {
-  candidates: AppState[];
+  candidates: Contender[];
   /** Set by the knob: an app the user chose to sit on. */
   pinned: string | null;
   /** Who holds the screen at the moment, and since when. */
@@ -45,9 +51,11 @@ export function decide(input: ArbiterInput): Decision {
 
   const holder = candidates.find((app) => app.name === current);
   if (holder && best.name !== holder.name && now - currentSince < minHoldMs) {
-    // Rank is a claim on the screen strong enough to interrupt; wanting it
-    // slightly more within the same rank is not.
-    if (best.rank <= holder.rank) {
+    // Rank is a claim on the screen strong enough to interrupt, and so is an
+    // app saying it is urgent; wanting it slightly more within the same rank
+    // is not.
+    const urgent = best.want === 'urgent' && holder.want !== 'urgent';
+    if (best.rank <= holder.rank && !urgent && tier(best) <= tier(holder)) {
       return { name: holder.name, reason: 'hold' };
     }
   }
@@ -55,9 +63,24 @@ export function decide(input: ArbiterInput): Decision {
   return { name: best.name, reason: 'rank' };
 }
 
-/** Rank first, then the app's own draw priority, then whoever spoke last. */
-function compare(a: AppState, b: AppState): number {
-  return b.rank - a.rank || b.priority - a.priority || b.lastDrawAt - a.lastDrawAt;
+/**
+ * Wanting the screen at all first — an `idle` app is shown only when nothing
+ * else asks — then rank, then saying it is urgent, then the app's own draw
+ * priority, then whoever spoke last.
+ */
+function compare(a: Contender, b: Contender): number {
+  return (
+    tier(b) - tier(a) ||
+    b.rank - a.rank ||
+    Number(b.want === 'urgent') - Number(a.want === 'urgent') ||
+    b.priority - a.priority ||
+    b.lastDrawAt - a.lastDrawAt
+  );
+}
+
+/** `urgent` does not jump the manifest's order; it wins ties and interrupts holds. */
+function tier(app: Contender): number {
+  return app.want === 'idle' ? 0 : 1;
 }
 
 /**
@@ -65,7 +88,7 @@ function compare(a: AppState, b: AppState): number {
  * so turning it walks down from what is on screen rather than around a set
  * whose order nothing explains.
  */
-export function cycleOrder(candidates: AppState[]): string[] {
+export function cycleOrder(candidates: Contender[]): string[] {
   return [...candidates].sort(compare).map((app) => app.name);
 }
 

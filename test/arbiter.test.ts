@@ -1,19 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { cycleOrder, decide, nextPin } from '../src/wm/arbiter.js';
-import type { AppState } from '../src/wm/registry.js';
+import type { Contender } from '../src/wm/arbiter.js';
 
-function app(name: string, over: Partial<AppState> = {}): AppState {
+function app(name: string, over: Partial<Contender> = {}): Contender {
   return {
     name,
     rank: 10,
-    managed: true,
-    running: true,
-    frame: { application_name: name },
-    frameKey: name,
     priority: 50,
     lastDrawAt: 0,
-    yieldedAt: 0,
     ...over,
   };
 }
@@ -119,4 +114,59 @@ test('the knob walks the same order the arbiter would pick in', () => {
   assert.equal(nextPin(order, 'a', -1), 'c');
   assert.equal(nextPin(order, null, 1), 'a', 'starting from nothing lands on the first');
   assert.equal(nextPin([], null, 1), null);
+});
+
+test('an idle app is shown only when nothing else wants the screen', () => {
+  const idle = app('nowplaying', { rank: 90, want: 'idle' });
+
+  assert.equal(
+    decide({ ...base, candidates: [idle, app('clock', { rank: 1 })] }).name,
+    'clock',
+  );
+  assert.equal(decide({ ...base, candidates: [idle] }).name, 'nowplaying');
+});
+
+test('urgent interrupts a hold, where wanting it more does not', () => {
+  const holding = { ...base, current: 'dota', currentSince: 900, now: 1000 };
+  const dota = app('dota', { rank: 40 });
+
+  assert.equal(
+    decide({ ...holding, candidates: [dota, app('chess', { rank: 40, priority: 90 })] })
+      .reason,
+    'hold',
+  );
+  assert.deepEqual(
+    decide({
+      ...holding,
+      candidates: [dota, app('chess', { rank: 40, want: 'urgent' })],
+    }),
+    { name: 'chess', reason: 'rank' },
+  );
+});
+
+test('an app that stops being idle takes the screen back at once', () => {
+  const holding = { ...base, current: 'clock', currentSince: 900, now: 1000 };
+
+  assert.equal(
+    decide({
+      ...holding,
+      candidates: [
+        app('clock', { rank: 1 }),
+        app('nowplaying', { rank: 1, want: 'normal' }),
+      ],
+    }).name,
+    'clock',
+    'same place in line: the hold stands',
+  );
+  assert.equal(
+    decide({
+      ...holding,
+      candidates: [
+        app('clock', { rank: 1, want: 'idle' }),
+        app('nowplaying', { rank: 1 }),
+      ],
+    }).name,
+    'nowplaying',
+    'but an idle holder holds nothing against an app that asks',
+  );
 });

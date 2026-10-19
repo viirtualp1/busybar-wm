@@ -1,6 +1,14 @@
 import { BarApiError } from 'busybar-kit/errors';
 import { isCloudAddr } from 'busybar-kit/config';
-import type { DrawPayload } from '../wm/registry.js';
+import type { Element } from '../wm/scene.js';
+
+/** A `/display/draw` body, as the device takes it. */
+export type DrawPayload = {
+  application_name: string;
+  priority?: number;
+  elements: Element[];
+  led_notification_color?: string;
+};
 
 export type UpstreamOptions = {
   addr: string;
@@ -69,6 +77,17 @@ export class Upstream {
       'DELETE',
       this.url('/display/draw', { application_name: applicationName }),
     );
+  }
+
+  /**
+   * Some of an application's elements, by id. The device refuses the whole
+   * request if any one of them is not on the canvas.
+   */
+  async deleteElements(applicationName: string, ids: string[]): Promise<void> {
+    await this.request('DELETE', this.url('/display/draw'), {
+      body: JSON.stringify({ application_name: applicationName, element_ids: ids }),
+      contentType: 'application/json',
+    });
   }
 
   /**

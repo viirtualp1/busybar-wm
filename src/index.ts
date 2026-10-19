@@ -1,6 +1,14 @@
 export { Daemon, type DaemonDeps } from './wm/daemon.js';
 export { Compositor, type CompositorOptions, type Logger } from './wm/compositor.js';
-export { Registry, type AppState, type DrawPayload } from './wm/registry.js';
+export {
+  Scene,
+  type ClientState,
+  type SurfaceState,
+  type Frame,
+  type Element,
+} from './wm/scene.js';
+export { OWNER, compose, diff, rehome, namespaced } from './wm/canvas.js';
+export { type DrawPayload } from './proxy/legacy.js';
 export { Supervisor, type AppHealth, type SupervisorOptions } from './wm/supervisor.js';
 export {
   decide,
@@ -19,3 +27,12 @@ export {
   type WmManifest,
 } from './manifest.js';
 export { loadConfig, DEFAULTS, type Config } from './config.js';
+export { DisplayServer, type DisplayServerOptions } from './protocol/server.js';
+export { Tokens } from './protocol/tokens.js';
+export {
+  DISPLAY_PATH,
+  PROTOCOL,
+  parseClientMessage,
+  type ClientMessage,
+  type ServerMessage,
+} from './protocol/messages.js';

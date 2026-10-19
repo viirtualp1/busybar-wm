@@ -36,7 +36,8 @@ Draws are answered by the daemon. An app that is off screen is told its frame
 landed — because it did, here — and carries on as if it owned the display.
 Everything that is not a draw (asset uploads, the status socket, brightness,
 `/version`) is piped straight through to the hardware, so cover art keeps
-uploading and the Bar's own controls keep working.
+uploading and the Bar's own controls keep working. Uploads are moved on the way:
+see [One canvas](#one-canvas).
 
 ## Quick start
 
@@ -176,19 +177,58 @@ can take over, so two apps that both redraw every 200ms do not trade the screen
 at 200ms. An app higher in the list interrupts immediately — that is what the
 order is for.
 
-Only one app's elements are ever on the device. They persist there by id, so a
-handover clears the outgoing app before the incoming one draws.
+### One canvas
+
+The Bar's canvas has a single owner: a draw under another name needs a strictly
+higher priority, and then wipes whatever the previous owner had. So the device
+only ever sees one application, `busybar-wm`, and each app's element ids carry
+its name — `nowplaying/legacy:title`. What the canvas holds is remembered here, so
+a new frame, or a handover between apps, reaches the device as the difference:
+what changed is drawn, what went is deleted by id, and the screen is never
+blanked in between.
+
+An image's `path` resolves inside the drawing application's own folder on the
+Bar, so uploads are moved into `busybar-wm`'s: `cover.png` from nowplaying is
+stored as `nowplaying/cover.png`, and the app's image elements are pointed at it.
+Sounds an app uploaded are played from there too. Nothing changes in the apps.
+
+A short BACK on the device, or a move of the switch, closes the canvas whatever
+is on it. The daemon hears it on the input socket and draws the frame again a
+moment later, instead of waiting for the app to change something.
 
 ### By hand
 
 With `WM_INPUT=1` (the default) the Bar's own buttons switch apps:
 
-- **OK** — step to the next app that has something to show,
+- **holding OK** — step to the next app that has something to show,
 - **BACK** — give the choice back to the policy.
 
-The **knob is left alone** by default. Apps bind it themselves —
-`busybar-nowplaying` makes it the system volume — and taking it at this level
-would break them. `WM_KNOB=1` if you would rather turn to switch.
+A short OK, START and the knob are the apps'. An app on the display socket asks
+for the ones it wants — `focused`, to hear them while it is on screen, or
+`always`, to hear them whatever is — and gets them over the socket; only one
+app can hold a key `always`. `busybar-nowplaying` holds the knob that way, as
+the system volume. Apps behind the proxy read the status socket themselves and
+hear every press, as before.
+
+`WM_KNOB=1` makes the knob the window manager's instead: turning it switches
+apps, and no app can ask for it.
+
+## The display socket
+
+An app can do better than draw and hope. `ws://127.0.0.1:4111/wm/v1/display`
+speaks the display protocol: the app names itself, creates a surface per panel,
+and commits whole frames; the daemon says when a surface is shown or hidden, and
+sends `frame` when a draw would be seen — so an app off screen renders nothing.
+The session is the app's life: when it closes, its frames go.
+
+Every supervised app is given `WM_ADDR` and its own `WM_TOKEN`, and
+`busybar-kit/display` is the client. Apps behind the proxy and apps on the
+socket share one scene and one policy. The design, and why each message
+exists, is in [docs/display-server.md](docs/display-server.md).
+
+| Variable      |                                                              |
+| ------------- | ------------------------------------------------------------ |
+| `WM_FRAME_MS` | The fastest a shown surface is asked to draw. Default `100`. |
 
 ## Without a Bar
 
@@ -236,6 +276,13 @@ Colour is on in a terminal and off in a file or pipe; `NO_COLOR=1` turns it off.
   not know they are hidden, so a background app goes on asking Steam or Stratz
   for updates. Ranking is not rate limiting.
 - **`WM_KNOB=1` fights any app that uses the knob.** See above.
+- **An app deleting its assets is answered, not obeyed.** Every app's uploads
+  share `busybar-wm`'s folder on the Bar, and the device can only delete a
+  folder whole, so a `DELETE /assets/upload` would take everyone's covers. The
+  files stay; nothing draws them once the app stops naming them.
+- **A hundred elements in all.** That is the device's limit for the canvas, and
+  it now counts every app's elements on screen together — which, while one app
+  is shown at a time, is the same as before.
 
 ## Two things that pile up, and no longer do
 
@@ -261,13 +308,14 @@ ignored, because by then the pid belongs to somebody else.
 
 ```
 src/proxy/     the Bar, as far as an app is concerned — server and socket tunnel
-src/wm/        registry (who wants the screen), arbiter (who gets it),
-               compositor (making it so), supervisor (the processes)
+src/wm/        scene (who wants the screen, and with what), arbiter (who gets
+               it), canvas (what the device should hold), compositor (making
+               it so), supervisor (the processes)
 src/bar/       the one connection that reaches the hardware, and its input socket
 src/mock-bar.ts a BUSY Bar that is not a BUSY Bar
 ```
 
-The arbiter is a pure function and the registry is a plain state machine, on
+The arbiter and the canvas are pure functions and the scene is a plain state machine, on
 purpose: the entire policy of the window manager is testable without a device,
 a socket, or a clock.
 

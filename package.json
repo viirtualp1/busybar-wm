@@ -1,6 +1,6 @@
 {
   "name": "busybar-wm",
-  "version": "1.6.0",
+  "version": "2.0.0",
   "description": "A window manager for the BUSY Bar: one screen, many apps, arbitrated by a reverse proxy in front of the device",
   "author": "viirtualp1",
   "license": "MIT",
@@ -53,12 +53,14 @@
   },
   "dependencies": {
     "busybar-deck": "^1.5.0",
-    "busybar-kit": "^2.3.0"
+    "busybar-kit": "^2.3.0",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@busy-app/busy-lib": "^0.18.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.13.3",
+    "@types/ws": "^8.18.2",
     "eslint": "^10.8.1",
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.9.6",

@@ -18,6 +18,7 @@ export const DEFAULTS = {
   minHoldMs: 3000,
   pinTimeoutMs: 60_000,
   tickMs: 1000,
+  frameMs: 100,
   staleMs: 600_000,
   restartDelayMs: 2000,
   requestTimeoutMs: 10_000,
@@ -28,6 +29,7 @@ const LIMITS = {
   minHoldMs: { min: 0, max: 60_000 },
   pinTimeoutMs: { min: 0, max: 3_600_000 },
   tickMs: { min: 100, max: 10_000 },
+  frameMs: { min: 20, max: 2000 },
   staleMs: { min: 1000, max: 86_400_000 },
   restartDelayMs: { min: 200, max: 60_000 },
   requestTimeoutMs: { min: 1000, max: 30_000 },
@@ -47,6 +49,8 @@ export type Config = {
   minHoldMs: number;
   pinTimeoutMs: number;
   tickMs: number;
+  /** The shortest gap between two `frame` callbacks to one surface on the display socket. */
+  frameMs: number;
   staleMs: number;
   restartDelayMs: number;
   requestTimeoutMs: number;
@@ -89,6 +93,7 @@ export function loadConfig(
       minHoldMs: number('WM_MIN_HOLD_MS', DEFAULTS.minHoldMs, LIMITS.minHoldMs, true),
       pinTimeoutMs: number('WM_PIN_MS', DEFAULTS.pinTimeoutMs, LIMITS.pinTimeoutMs, true),
       tickMs: number('WM_TICK_MS', DEFAULTS.tickMs, LIMITS.tickMs, true),
+      frameMs: number('WM_FRAME_MS', DEFAULTS.frameMs, LIMITS.frameMs, true),
       staleMs: number('WM_STALE_MS', DEFAULTS.staleMs, LIMITS.staleMs, true),
       restartDelayMs: number(
         'WM_RESTART_MS',

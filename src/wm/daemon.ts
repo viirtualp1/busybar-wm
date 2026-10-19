@@ -4,9 +4,13 @@ import { BarInput, type InputEvent } from '../bar/input.js';
 import { Upstream } from '../bar/upstream.js';
 import type { Config } from '../config.js';
 import type { AppManifest, WmManifest } from '../manifest.js';
+import { DISPLAY_PATH } from '../protocol/messages.js';
+import { DisplayServer } from '../protocol/server.js';
+import { Tokens } from '../protocol/tokens.js';
 import { ProxyServer } from '../proxy/server.js';
 import { Compositor, type Logger } from './compositor.js';
-import { Registry } from './registry.js';
+import { Gestures, type Gesture } from './gestures.js';
+import { Scene } from './scene.js';
 import { Supervisor, type AppHealth } from './supervisor.js';
 
 export type DaemonDeps = {
@@ -23,21 +27,34 @@ export type DaemonDeps = {
 const CONNECT_RETRY_MS = 2000;
 
 /**
+ * How long after BACK is let go, or the switch moves, before the canvas is
+ * drawn again. The device closes it on the short press it recognises at
+ * release; drawing before it has done so would only be wiped with it.
+ */
+const DROP_SETTLE_MS = 300;
+
+/** How long OK is held to mean "next app"; anything shorter is a press for the app. */
+const HOLD_MS = 600;
+
+/**
  * The whole window manager, wired together.
  *
  * Four parts, each of which only knows the one next to it: the proxy learns who
- * wants the screen, the registry remembers it, the arbiter decides, and the
+ * wants the screen, the scene remembers it, the arbiter decides, and the
  * supervisor keeps the processes it decides between alive.
  */
 export class Daemon {
-  private readonly registry: Registry;
+  private readonly scene: Scene;
   private readonly upstream: Upstream;
   private readonly compositor: Compositor;
   private readonly proxy: ProxyServer;
+  private readonly display: DisplayServer;
   private readonly supervisor: Supervisor;
   private readonly logger: Logger;
   private deck: Mounted | null = null;
   private input: BarInput | null = null;
+  private dropTimer: NodeJS.Timeout | null = null;
+  private readonly gestures: Gestures;
   private running = false;
   /** The manifest as it stands now, including apps added since startup. */
   private readonly apps: AppManifest[];
@@ -56,31 +73,49 @@ export class Daemon {
         : {}),
     });
 
-    this.registry = new Registry(manifest.apps, {
+    this.scene = new Scene(manifest.apps, {
       staleMs: config.staleMs,
       onChange: () => this.compositor.wake(),
     });
 
-    this.compositor = new Compositor(this.registry, this.upstream, {
+    this.compositor = new Compositor(this.scene, this.upstream, {
       minHoldMs: config.minHoldMs,
       pinTimeoutMs: config.pinTimeoutMs,
       tickMs: config.tickMs,
       logger: this.logger,
+      onShow: (name) => this.display.show(name),
+    });
+
+    const tokens = new Tokens();
+    this.display = new DisplayServer({
+      scene: this.scene,
+      tokens,
+      frameMs: config.frameMs,
+      ...(config.knob ? { reservedKeys: ['encoder' as const] } : {}),
+      logger: this.logger,
+    });
+
+    this.gestures = new Gestures({
+      holdMs: HOLD_MS,
+      knob: config.knob,
+      onGesture: (gesture) => this.onGesture(gesture),
     });
 
     this.proxy = new ProxyServer({
       host: config.host,
       port: config.port,
       upstream: this.upstream,
-      registry: this.registry,
+      scene: this.scene,
       logger: this.logger,
       timeoutMs: config.requestTimeoutMs,
+      display: this.display,
       deck: (req, res) => this.deck?.handle(req, res) ?? Promise.resolve(false),
     });
 
     this.supervisor = new Supervisor(manifest.apps, {
       proxyAddr: `http://${config.host}:${config.port}`,
-      registry: this.registry,
+      display: { addr: `ws://${config.host}:${config.port}${DISPLAY_PATH}`, tokens },
+      scene: this.scene,
       restartDelayMs: config.restartDelayMs,
       // Beside the manifest, so each profile keeps its own note of what it
       // started — and a second profile does not adopt the first one's strays.
@@ -109,7 +144,7 @@ export class Daemon {
         live: {
           status: { connected: true },
           state: {
-            running: (name: string) => this.registry.get(name)?.running ?? false,
+            running: (name: string) => this.scene.get(name)?.running ?? false,
             onScreen: () => this.compositor.showing,
             pin: () => this.compositor.pin,
             restart: (name: string) => this.supervisor.restart(name),
@@ -212,7 +247,7 @@ export class Daemon {
     }
 
     this.apps.push(app);
-    this.registry.add(app);
+    this.scene.add(app);
     this.supervisor.add(app);
     // Ranks come from places in the list, and the list just grew: everyone
     // else's rank moves with it, or the newcomer would tie with the last app.
@@ -235,7 +270,7 @@ export class Daemon {
     if (this.compositor.pin === name) {
       this.compositor.unpin();
     }
-    this.registry.remove(name);
+    this.scene.remove(name);
     this.logger.info(`[wm] removed ${name}`);
   }
 
@@ -245,7 +280,7 @@ export class Daemon {
       const rank = ranks[app.name];
       if (typeof rank === 'number' && Number.isFinite(rank)) {
         app.rank = rank;
-        this.registry.setRank(app.name, rank);
+        this.scene.setRank(app.name, rank);
       }
     }
   }
@@ -256,7 +291,13 @@ export class Daemon {
     }
     this.running = false;
     this.input?.stop();
+    this.gestures.stop();
+    if (this.dropTimer) {
+      clearTimeout(this.dropTimer);
+      this.dropTimer = null;
+    }
     await this.supervisor.stop();
+    await this.display.close();
     await this.compositor.stop();
     await this.proxy.close();
   }
@@ -303,22 +344,44 @@ export class Daemon {
   }
 
   private onInput(event: InputEvent): void {
-    if (event.kind === 'encoder') {
-      if (this.deps.config.knob) {
-        this.compositor.cycle(event.delta);
-      }
+    this.gestures.handle(event);
+  }
 
-      return;
-    }
+  private onGesture(gesture: Gesture): void {
+    switch (gesture.kind) {
+      case 'next':
+        this.compositor.cycle(1);
 
-    if (event.kind !== 'button' || event.action !== 'press') {
-      return;
-    }
+        return;
+      case 'automatic':
+        this.compositor.unpin();
 
-    if (event.button === 'ok') {
-      this.compositor.cycle(1);
-    } else if (event.button === 'back') {
-      this.compositor.unpin();
+        return;
+      case 'cycle':
+        this.compositor.cycle(gesture.delta);
+
+        return;
+      case 'dropped':
+        // The device closes the API's canvas by itself on a short BACK and on
+        // any move of the switch, and goes to its own screen.
+        this.afterDrop();
+
+        return;
+      case 'app':
+        this.display.deliver(gesture.event);
+
+        return;
     }
+  }
+
+  private afterDrop(): void {
+    if (this.dropTimer) {
+      clearTimeout(this.dropTimer);
+    }
+    this.dropTimer = setTimeout(() => {
+      this.dropTimer = null;
+      this.compositor.deviceDropped();
+    }, DROP_SETTLE_MS);
+    this.dropTimer.unref();
   }
 }

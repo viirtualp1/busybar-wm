@@ -8,20 +8,27 @@ import {
 import { request as httpsRequest } from 'node:https';
 import { errorMessage } from 'busybar-kit/errors';
 import type { Upstream } from '../bar/upstream.js';
-import type { DrawPayload, Registry } from '../wm/registry.js';
+import { OWNER, rehome } from '../wm/canvas.js';
 import type { Logger } from '../wm/compositor.js';
+import { DISPLAY_PATH } from '../protocol/messages.js';
+import type { DisplayServer } from '../protocol/server.js';
+import type { Scene } from '../wm/scene.js';
+import { PLACEHOLDER_CREDENTIAL } from '../wm/supervisor.js';
+import { legacyClear, legacyDraw, type DrawPayload } from './legacy.js';
 import { tunnel } from './tunnel.js';
 
 export type ProxyOptions = {
   host: string;
   port: number;
   upstream: Upstream;
-  registry: Registry;
+  scene: Scene;
   logger?: Logger;
   /**
    * Local `/wm` config API + UI. Checked before device pass-through; must never
    * be forwarded to the Bar.
    */
+  /** The display socket, answered here rather than tunnelled to the Bar. */
+  display?: DisplayServer;
   /** The deck answers `/deck` before anything is forwarded to the device. */
   deck?: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
   /**
@@ -43,13 +50,15 @@ class UpstreamTimeout extends Error {
 /** The API prefixes the Bar mounts itself under, local and cloud. */
 const PREFIXES = ['/api', '/busybar'];
 const DRAW_PATH = '/display/draw';
+const ASSETS_PATH = '/assets/upload';
+const AUDIO_PATH = '/audio/play';
 const MAX_BODY = 4 * 1024 * 1024;
 
 /**
  * A BUSY Bar, as far as every app is concerned.
  *
  * Apps point `BUSY_ADDR` here instead of at the device. Draws are answered from
- * this process — the app is told its frame landed, and it did, in the registry —
+ * this process — the app is told its frame landed, and it did, in the scene —
  * while everything else, asset uploads and the status socket included, is piped
  * straight through to the hardware. That asymmetry is the whole trick: an app
  * off screen keeps uploading its cover art and keeps believing it is drawing,
@@ -59,6 +68,7 @@ export class ProxyServer {
   private readonly server: Server;
   private readonly logger: Logger;
   private warnedGlobalClear = false;
+  private warnedAssetDelete = false;
 
   constructor(private readonly options: ProxyOptions) {
     this.logger = options.logger ?? console;
@@ -68,6 +78,11 @@ export class ProxyServer {
       });
     });
     this.server.on('upgrade', (req, socket, head) => {
+      if (this.options.display?.handles(req)) {
+        this.options.display.upgrade(req, socket, head);
+
+        return;
+      }
       tunnel(req, socket, head, this.options.upstream, this.rewrite.bind(this)).catch(
         (error: unknown) => {
           this.logger.warn(`[proxy] socket upgrade failed: ${errorMessage(error)}`);
@@ -108,13 +123,29 @@ export class ProxyServer {
       return;
     }
 
+    if (url.pathname === DISPLAY_PATH) {
+      res.writeHead(426, { 'content-type': 'application/json', upgrade: 'websocket' });
+      res.end(JSON.stringify({ error: 'the display protocol is a WebSocket' }));
+
+      return;
+    }
+
     const route = strip(url.pathname);
 
     if (route === DRAW_PATH && req.method === 'POST') {
       return await this.onDraw(req, res);
     }
     if (route === DRAW_PATH && req.method === 'DELETE') {
-      return this.onClear(url, res);
+      return await this.onClear(req, url, res);
+    }
+    if (route === ASSETS_PATH && req.method === 'DELETE') {
+      return this.onAssetsDelete(url, res);
+    }
+    if (route === ASSETS_PATH) {
+      rehomeUpload(url);
+    }
+    if (route === AUDIO_PATH && req.method === 'POST') {
+      return await this.onAudio(req, res, url);
     }
 
     this.passThrough(req, res, url);
@@ -145,12 +176,33 @@ export class ProxyServer {
       );
     }
 
-    this.options.registry.draw(payload);
+    legacyDraw(this.options.scene, payload);
     ok(res);
   }
 
-  private onClear(url: URL, res: ServerResponse): void {
-    const name = url.searchParams.get('application_name');
+  private async onClear(
+    req: IncomingMessage,
+    url: URL,
+    res: ServerResponse,
+  ): Promise<void> {
+    // The device takes the name in the query or in a JSON body, and a body may
+    // name only some elements.
+    let body: { application_name?: unknown; element_ids?: unknown } = {};
+    const raw = await readBody(req);
+    if (raw.length > 0) {
+      try {
+        body = JSON.parse(raw.toString('utf8')) as typeof body;
+      } catch {
+        body = {};
+      }
+    }
+    const fromBody =
+      typeof body.application_name === 'string' ? body.application_name : null;
+    const name = url.searchParams.get('application_name') || fromBody;
+    const ids = Array.isArray(body.element_ids)
+      ? body.element_ids.filter((id): id is string => typeof id === 'string')
+      : undefined;
+
     if (!name) {
       // Under the window manager an app only ever speaks for itself, and a
       // clear with no name would take the screen from whoever holds it.
@@ -162,8 +214,51 @@ export class ProxyServer {
       return ok(res);
     }
 
-    this.options.registry.clear(name);
+    legacyClear(this.options.scene, name, ids);
     ok(res);
+  }
+
+  /**
+   * An app clearing out its uploads. They live in a folder of `OWNER`'s now,
+   * and the device can only delete an application's folder whole — which would
+   * take every other app's covers with it. So the request is answered here and
+   * the files are left; nothing draws them once the app stops naming them.
+   */
+  private onAssetsDelete(url: URL, res: ServerResponse): void {
+    const name = url.searchParams.get('application_name');
+    if (!this.warnedAssetDelete) {
+      this.logger.info(
+        `[proxy] ${name ?? 'an app'} asked to delete its assets; kept, since they share one folder on the Bar`,
+      );
+      this.warnedAssetDelete = true;
+    }
+    ok(res);
+  }
+
+  /** A sound an app uploaded lives where its images do, under `OWNER`. */
+  private async onAudio(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const raw = await readBody(req);
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+    } catch {
+      return this.passThroughBody(req, res, url, raw);
+    }
+
+    const name = body['application_name'];
+    const path = body['path'];
+    if (typeof name !== 'string' || typeof path !== 'string') {
+      return this.passThroughBody(req, res, url, raw);
+    }
+
+    const rewritten = Buffer.from(
+      JSON.stringify({ ...body, application_name: OWNER, path: rehome(name, path) }),
+    );
+    this.passThroughBody(req, res, url, rewritten);
   }
 
   private passThrough(req: IncomingMessage, res: ServerResponse, url: URL): void {
@@ -180,10 +275,16 @@ export class ProxyServer {
     url: URL,
     body: Buffer,
   ): void {
-    const proxied = this.open(req, res, url, (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-      upstreamRes.pipe(res);
-    });
+    const proxied = this.open(
+      req,
+      res,
+      url,
+      (upstreamRes) => {
+        res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        upstreamRes.pipe(res);
+      },
+      body.length,
+    );
     proxied.end(body);
   }
 
@@ -192,14 +293,20 @@ export class ProxyServer {
     res: ServerResponse,
     url: URL,
     onResponse: (res: IncomingMessage) => void,
+    bodyLength?: number,
   ) {
     const target = this.rewrite(url);
     const send = target.protocol === 'https:' ? httpsRequest : httpRequest;
+    const headers = this.forwardHeaders(req, target);
+    if (bodyLength !== undefined) {
+      headers['content-length'] = String(bodyLength);
+      delete headers['transfer-encoding'];
+    }
     const proxied = send(
       target,
       {
         method: req.method ?? 'GET',
-        headers: this.forwardHeaders(req, target),
+        headers,
       },
       onResponse,
     );
@@ -267,6 +374,8 @@ export class ProxyServer {
       delete headers['authorization'];
       delete headers['x-api-token'];
       Object.assign(headers, own);
+    } else if (headers['x-api-token'] === PLACEHOLDER_CREDENTIAL) {
+      delete headers['x-api-token'];
     }
 
     return headers;
@@ -296,6 +405,20 @@ export function strip(pathname: string): string {
   }
 
   return pathname;
+}
+
+/**
+ * An upload, moved into `OWNER`'s folder: the app's draws are drawn as `OWNER`,
+ * and an image's path resolves inside the drawing application's folder.
+ */
+export function rehomeUpload(url: URL): void {
+  const name = url.searchParams.get('application_name');
+  const file = url.searchParams.get('file');
+  if (!name || !file || name === OWNER) {
+    return;
+  }
+  url.searchParams.set('application_name', OWNER);
+  url.searchParams.set('file', rehome(name, file));
 }
 
 function ok(res: ServerResponse): void {

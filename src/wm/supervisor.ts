@@ -2,13 +2,27 @@ import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { createInterface } from 'node:readline';
 import type { AppManifest } from '../manifest.js';
 import type { Logger } from './compositor.js';
-import type { Registry } from './registry.js';
+import type { Tokens } from '../protocol/tokens.js';
+import type { Scene } from './scene.js';
 import { Strays } from './strays.js';
+
+/**
+ * What a supervised app is given as its Bar password. The daemon holds the real
+ * one, and replaces this on the way out — or, with no password of its own, as
+ * for a Bar on USB, drops it, since a wrong password is refused where none is
+ * not.
+ */
+export const PLACEHOLDER_CREDENTIAL = 'managed-by-wm';
 
 export type SupervisorOptions = {
   /** What the children get as `BUSY_ADDR` — this daemon, not the device. */
   proxyAddr: string;
-  registry: Registry;
+  /**
+   * The display socket, handed to every child as `WM_ADDR` with its own
+   * `WM_TOKEN`. Left out, children are only told about the proxy.
+   */
+  display?: { addr: string; tokens: Tokens };
+  scene: Scene;
   restartDelayMs: number;
   /** Where the note about running children is kept between runs. */
   stateDir?: string;
@@ -287,7 +301,7 @@ export class Supervisor {
 
     child.process = proc;
     child.startedAt = Date.now();
-    this.options.registry.setRunning(manifest.name, true);
+    this.options.scene.setRunning(manifest.name, true);
     this.logger.info(`[wm] started ${manifest.name} (pid ${proc.pid ?? '?'})`);
     if (proc.pid) {
       this.strays.remember(proc.pid, manifest.name);
@@ -302,7 +316,7 @@ export class Supervisor {
       // either — without this it would count as running forever.
       if (!proc.pid && child.process === proc) {
         child.process = null;
-        this.options.registry.setRunning(manifest.name, false);
+        this.options.scene.setRunning(manifest.name, false);
         this.scheduleRestart(child, false);
       }
     });
@@ -315,7 +329,7 @@ export class Supervisor {
         this.strays.forget(proc.pid);
       }
       child.exit = { code, signal, at: Date.now() };
-      this.options.registry.setRunning(manifest.name, false);
+      this.options.scene.setRunning(manifest.name, false);
       const how = signal ? `signal ${signal}` : `code ${code ?? 0}`;
       this.logger.info(`[wm] ${manifest.name} exited (${how})`);
       this.scheduleRestart(child, code === 0 && !signal);
@@ -407,8 +421,16 @@ export class Supervisor {
       BUSY_ADDR: this.options.proxyAddr,
       // The daemon holds the real credential. Apps still need *a* value here,
       // or busybar-kit warns every one of them about a missing Wi-Fi password.
-      BUSY_HTTP_PASSWORD: manifest.env['BUSY_HTTP_PASSWORD'] ?? 'managed-by-wm',
+      BUSY_HTTP_PASSWORD: manifest.env['BUSY_HTTP_PASSWORD'] ?? PLACEHOLDER_CREDENTIAL,
       BUSY_TOKEN: manifest.env['BUSY_TOKEN'] ?? '',
+      // An app that speaks the display protocol finds the window manager here;
+      // one that does not never looks.
+      ...(this.options.display
+        ? {
+            WM_ADDR: this.options.display.addr,
+            WM_TOKEN: this.options.display.tokens.issue(manifest.name),
+          }
+        : {}),
     };
   }
 
