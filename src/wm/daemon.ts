@@ -9,6 +9,7 @@ import { DisplayServer } from '../protocol/server.js';
 import { Tokens } from '../protocol/tokens.js';
 import { ProxyServer } from '../proxy/server.js';
 import { Compositor, type Logger } from './compositor.js';
+import { handleControl } from './control.js';
 import { Gestures, type Gesture } from './gestures.js';
 import { Scene } from './scene.js';
 import { Supervisor, type AppHealth } from './supervisor.js';
@@ -109,6 +110,50 @@ export class Daemon {
       logger: this.logger,
       timeoutMs: config.requestTimeoutMs,
       display: this.display,
+      control: (req, res) =>
+        handleControl(req, res, process.env['WM_API_TOKEN'], {
+          status: () => ({
+            activeApp: this.compositor.showing,
+            pinnedApp: this.compositor.pin,
+          }),
+          apps: () => {
+            const ready = new Set(this.scene.candidates().map((app) => app.name));
+
+            return this.apps.map(({ name, rank, autostart }) => ({
+              name,
+              rank,
+              autostart,
+              ready: ready.has(name),
+              running: this.scene.get(name)?.running ?? false,
+            }));
+          },
+          switchApp: (name) => {
+            if (!this.apps.some((app) => app.name === name)) {
+              return 'missing';
+            }
+
+            if (!this.scene.candidates().some((app) => app.name === name)) {
+              return 'unavailable';
+            }
+
+            this.compositor.pinApp(name);
+
+            return 'pinned';
+          },
+          automatic: () => this.compositor.unpin(),
+          overlay: (overlay) => this.compositor.showOverlay(overlay),
+          clearOverlay: (display) => this.compositor.clearOverlay(display),
+          input: (events) => {
+            let recipient = null;
+
+            for (const event of events) {
+              recipient = this.display.deliver(event);
+            }
+
+            return recipient;
+          },
+          knobReserved: config.knob,
+        }),
       deck: (req, res) => this.deck?.handle(req, res) ?? Promise.resolve(false),
     });
 

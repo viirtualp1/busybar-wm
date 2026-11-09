@@ -115,6 +115,18 @@ All of it is in [.env.example](.env.example). The ones worth knowing:
 | `WM_INPUT`, `WM_KNOB` | The Bar's buttons; the knob for switching.           |
 | `WM_LOG`              | `verbose` for every line the apps print.             |
 
+## MCP control
+
+[BusyBar MCP](https://github.com/viirtualp1/busybar-mcp) uses
+`GET /wm/v1/control` to read the active and pinned app and list manifest apps.
+It uses `POST /wm/v1/control` for app switching, automatic scheduling,
+temporary messages, countdowns, and app input. The WM owns overlay expiry and
+keeps the app's frame beneath it. Input is routed through the display
+protocol's existing subscriptions.
+
+Control defaults to loopback access. Set `WM_API_TOKEN` on the WM and the same
+token on the MCP client to authenticate control requests.
+
 ## Development
 
 ```bash

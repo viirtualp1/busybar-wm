@@ -9,6 +9,7 @@ import { request as httpsRequest } from 'node:https';
 import { errorMessage } from 'busybar-kit/errors';
 import type { Upstream } from '../bar/upstream.js';
 import { OWNER, rehome } from '../wm/canvas.js';
+import { CONTROL_PATH } from '../wm/control.js';
 import type { Logger } from '../wm/compositor.js';
 import { DISPLAY_PATH } from '../protocol/messages.js';
 import type { DisplayServer } from '../protocol/server.js';
@@ -30,6 +31,7 @@ export type ProxyOptions = {
   /** The display socket, answered here rather than tunnelled to the Bar. */
   display?: DisplayServer;
   /** The deck answers `/deck` before anything is forwarded to the device. */
+  control?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   deck?: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
   /**
    * How long a forwarded request may sit with no traffic before it is given
@@ -118,6 +120,10 @@ export class ProxyServer {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://proxy.invalid');
+
+    if (url.pathname === CONTROL_PATH && this.options.control) {
+      return await this.options.control(req, res);
+    }
 
     if (this.options.deck && (await this.options.deck(req, res))) {
       return;

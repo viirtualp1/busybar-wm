@@ -1,8 +1,9 @@
 import { BarApiError, errorMessage, isLowPriority } from 'busybar-kit/errors';
 import type { Upstream } from '../bar/upstream.js';
 import { cycleOrder, decide, nextPin } from './arbiter.js';
-import { compose, diff, OWNER, type Desired } from './canvas.js';
-import type { Scene } from './scene.js';
+import { compose, diff, MAX_ELEMENTS, OWNER, type Desired } from './canvas.js';
+import type { Overlay } from './control.js';
+import { DEFAULT_PRIORITY, type Element, type Scene } from './scene.js';
 
 export type Logger = {
   info: (message: string) => void;
@@ -36,6 +37,8 @@ export type CompositorOptions = {
  * starts from a clear.
  */
 export class Compositor {
+  private readonly overlays = new Map<Overlay['display'], Overlay>();
+  private readonly overlayExpiry = new Map<Overlay['display'], NodeJS.Timeout>();
   private current: string | null = null;
   private currentSince = 0;
   private pinned: string | null = null;
@@ -85,6 +88,7 @@ export class Compositor {
       await this.clearOwn().catch(() => undefined);
     }
     this.current = null;
+    this.clearOverlay();
   }
 
   /** Something changed; work out what the screen should be, once. */
@@ -142,6 +146,68 @@ export class Compositor {
     this.wake();
   }
 
+  showOverlay(overlay: Overlay) {
+    const { display, endsAt } = overlay;
+    clearTimeout(this.overlayExpiry.get(display));
+    const expiry = setTimeout(
+      () => this.clearOverlay(display),
+      Math.max(0, endsAt - Date.now()),
+    );
+    expiry.unref();
+    this.overlayExpiry.set(display, expiry);
+    this.overlays.set(display, overlay);
+    this.wake();
+  }
+
+  clearOverlay(display?: Overlay['display']) {
+    const targets = display ? [display] : [...this.overlays.keys()];
+
+    for (const target of targets) {
+      clearTimeout(this.overlayExpiry.get(target));
+      this.overlayExpiry.delete(target);
+      this.overlays.delete(target);
+    }
+
+    this.wake();
+  }
+
+  private applyOverlays(desired: Desired, now: number) {
+    const overlays: Element[] = [];
+    let top = 0;
+
+    for (const element of desired.elements.values()) {
+      if (typeof element['z_index'] === 'number') {
+        top = Math.max(top, element['z_index']);
+      }
+    }
+
+    for (const overlay of this.overlays.values()) {
+      if (overlay.endsAt <= now) {
+        continue;
+      }
+
+      overlays.push(...overlayElements(overlay, now, top));
+    }
+
+    if (overlays.length === 0) {
+      return;
+    }
+
+    // Temporarily make room on a full canvas. The app's saved frame is still intact.
+    const overflow = Math.max(0, desired.elements.size + overlays.length - MAX_ELEMENTS);
+    for (const id of [...desired.elements.keys()].slice(0, overflow)) {
+      desired.elements.delete(id);
+    }
+
+    if (!this.current) {
+      desired.priority = DEFAULT_PRIORITY;
+    }
+
+    for (const element of overlays) {
+      desired.elements.set(element.id, element);
+    }
+  }
+
   private async drain(): Promise<void> {
     this.flushing = true;
     try {
@@ -185,9 +251,10 @@ export class Compositor {
     }
 
     const surfaces = this.current ? this.scene.visible(this.current) : [];
-    const desired = this.current
+    const desired: Desired = this.current
       ? compose(this.current, surfaces)
       : { elements: new Map(), priority: 0 };
+    this.applyOverlays(desired, now);
     const frames = `${this.current ?? ''}\n${surfaces.map((s) => s.frameKey).join('\n')}`;
 
     try {
@@ -293,4 +360,55 @@ export class Compositor {
       this.logger.info('[wm] pin expired, automatic again');
     }
   }
+}
+
+function overlayElements(overlay: Overlay, now: number, top: number) {
+  const { display } = overlay;
+  const front = display === 'front';
+  const width = front ? 72 : 146;
+  const height = front ? 16 : 24;
+  const y = front ? 0 : 28;
+  const text = overlay.kind === 'timer' ? timerText(overlay, now) : overlay.text;
+  const elements: Element[] = [
+    {
+      id: `wm-overlay-${display}-bg`,
+      type: 'rectangle',
+      display,
+      x: 0,
+      y,
+      width,
+      height,
+      fill: 'solid',
+      fill_colors: ['#000000FF'],
+      border_width: 0,
+      border_color: '#00000000',
+      align: 'top_left',
+      z_index: top + 1,
+      timeout: 0,
+    },
+    {
+      id: `wm-overlay-${display}-text`,
+      type: 'text',
+      display,
+      x: 1,
+      y: y + (front ? 4 : 7),
+      width: width - 2,
+      text,
+      font: 'small',
+      color: '#FFFFFFFF',
+      align: 'top_left',
+      ...(text.length > (front ? 17 : 35) ? { scroll_rate: 900 } : {}),
+      z_index: top + 2,
+      timeout: 0,
+    },
+  ];
+
+  return elements;
+}
+
+function timerText(overlay: Overlay, now: number) {
+  const seconds = Math.ceil((overlay.endsAt - now) / 1000);
+  const time = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+
+  return overlay.text ? `${time} ${overlay.text}` : time;
 }
