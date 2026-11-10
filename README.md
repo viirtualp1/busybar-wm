@@ -127,6 +127,28 @@ protocol's existing subscriptions.
 Control defaults to loopback access. Set `WM_API_TOKEN` on the WM and the same
 token on the MCP client to authenticate control requests.
 
+## Tap mode and the inspector
+
+`WM_MODE=tap` starts the window manager listening rather than deciding: draws
+go on to the Bar under each app's own name, and the device settles who wins by
+its own rules — `409` at equal priority, the old owner's elements wiped at a
+higher one. Apps on the display socket are shown and drawn as themselves, the
+way they would be with no window manager. The scene is kept current all the
+while, so switching to `manage` takes over with every app's last frame already
+in hand:
+
+```bash
+curl -X POST http://127.0.0.1:4111/wm/v1/control \
+  -H 'content-type: application/json' -d '{"action":"mode","mode":"manage"}'
+```
+
+`GET /wm/v1/events` streams what happens as server-sent events: requests and
+their answers, decisions, diffs, display-protocol messages, input, overlays and
+the Bar's own front panel. It is local only. Set `WM_INSPECTOR_DIR` to a build
+of [busybar-inspector](https://github.com/viirtualp1/bubsyar-inspector) to have it drawn at
+`http://127.0.0.1:4111/inspector/`; the page switches the mode itself. With
+`WM_API_TOKEN` set, it cannot — a browser does not hold the token.
+
 ## Development
 
 ```bash

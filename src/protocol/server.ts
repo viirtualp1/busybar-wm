@@ -7,6 +7,7 @@ import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { LEGACY_SURFACE } from '../proxy/legacy.js';
 import { MAX_ELEMENTS } from '../wm/canvas.js';
 import type { Logger } from '../wm/compositor.js';
+import type { Events } from '../wm/events.js';
 import { DEFAULT_PRIORITY, type Scene } from '../wm/scene.js';
 import {
   DISPLAY_PATH,
@@ -29,6 +30,12 @@ export type DisplayServerOptions = {
   /** Keys the window manager keeps for itself on top of BACK — the knob, with `WM_KNOB=1`. */
   reservedKeys?: InputKey[];
   logger?: Logger;
+  /** Told of every message on every session, for the inspector. */
+  events?: Events;
+  /** An app's frames changed: what tap mode draws for it. */
+  onFrames?: (app: string) => void;
+  /** Start in tap mode: every surface shown, as if there were no window manager. */
+  tap?: boolean;
 };
 
 /** A frame of a hundred elements is a few kilobytes; this is a lot of room. */
@@ -64,11 +71,31 @@ export class DisplayServer {
   private readonly pending = new Set<Session>();
   private readonly logger: Logger;
   private shown: string | null = null;
+  private tap: boolean;
   /** Each key grabbed `always`, and by whom: one app per key. */
   private readonly always = new Map<InputKey, string>();
 
   constructor(private readonly options: DisplayServerOptions) {
     this.logger = options.logger ?? console;
+    this.tap = options.tap ?? false;
+  }
+
+  /**
+   * Tap mode: every surface is shown and focused, the way an app sees the Bar
+   * with no window manager in front of it. Back out of it, nothing is shown
+   * until the window manager says who is.
+   */
+  setTap(tap: boolean) {
+    if (tap === this.tap) {
+      return;
+    }
+
+    this.tap = tap;
+    this.shown = null;
+
+    for (const session of this.sessions.values()) {
+      session.reconfigure();
+    }
   }
 
   /** Whether an upgrade request is for this socket rather than the Bar's. */
@@ -89,6 +116,9 @@ export class DisplayServer {
       return;
     }
     this.shown = name;
+    if (this.tap) {
+      return;
+    }
     for (const session of this.sessions.values()) {
       session.reconfigure();
     }
@@ -113,7 +143,17 @@ export class DisplayServer {
 
   /** @internal */
   isShown(app: string): boolean {
-    return this.shown === app;
+    return this.tap || this.shown === app;
+  }
+
+  /** @internal */
+  get events(): Events | undefined {
+    return this.options.events;
+  }
+
+  /** @internal */
+  framesChanged(app: string): void {
+    this.options.onFrames?.(app);
   }
 
   /** @internal — a hello: whether this session may be `app`, and taking the name if so. */
@@ -143,6 +183,18 @@ export class DisplayServer {
       return null;
     }
     const holder = this.always.get(key);
+
+    // With no window manager deciding, every app that asked hears the key.
+    if (this.tap && !holder) {
+      const listeners = [...this.sessions].filter(([, session]) => session.wants(key));
+
+      for (const [, session] of listeners) {
+        session.input(event);
+      }
+
+      return listeners[0]?.[0] ?? null;
+    }
+
     const target = holder ?? this.shown;
     const session = target ? this.sessions.get(target) : undefined;
     if (!target || !session || (!holder && !session.wants(key))) {
@@ -190,6 +242,8 @@ export class DisplayServer {
     this.releaseAlways(app, [...this.always.keys()]);
     this.sessions.delete(app);
     this.options.scene.disconnect(app, surfaces);
+    this.options.onFrames?.(app);
+    this.options.events?.forget(app);
     this.logger.info(`[wm] ${app} left the display socket`);
   }
 
@@ -295,6 +349,14 @@ class Session {
 
     try {
       this.handle(message);
+      this.tell(message);
+
+      if (
+        this.app &&
+        (message.type === 'surface.commit' || message.type === 'surface.destroy')
+      ) {
+        this.server.framesChanged(this.app);
+      }
     } catch (error) {
       if (error instanceof ProtocolError) {
         return this.fail(
@@ -431,6 +493,24 @@ class Session {
     }
   }
 
+  /** A message from the app, once it was taken, for the inspector. */
+  private tell(message: ClientMessage): void {
+    const events = this.server.events;
+
+    // Not only while someone listens: the handshake is kept for a page opened later.
+    if (!events || !this.app) {
+      return;
+    }
+
+    events.emit({
+      type: 'protocol',
+      app: this.app,
+      from: 'app',
+      message: message.type,
+      detail: describeClient(message),
+    });
+  }
+
   private configure(surface: Surface): void {
     surface.serial += 1;
     this.send({
@@ -482,6 +562,19 @@ class Session {
     if (this.ws.readyState === this.ws.OPEN) {
       this.ws.send(JSON.stringify(message));
     }
+
+    const events = this.server.events;
+
+    if (events && this.app) {
+      events.emit({
+        type: 'protocol',
+        app: this.app,
+        from: 'wm',
+        message: message.type,
+        detail: describeServer(message),
+        ...(message.type === 'configure' ? { visible: message.visible } : {}),
+      });
+    }
   }
 
   /** Once, however the session ended: its surfaces leave the scene. */
@@ -494,6 +587,42 @@ class Session {
       this.stopFrames(surface);
     }
     this.server.closed(this, this.app, [...this.surfaces.keys()]);
+  }
+}
+
+function describeClient(message: ClientMessage) {
+  switch (message.type) {
+    case 'hello':
+      return `protocol ${message.protocol}`;
+    case 'surface.create':
+      return `${message.surface} · ${message.display}`;
+    case 'surface.commit':
+      return `${message.surface} · ${message.elements.length}`;
+    case 'surface.want':
+      return `${message.surface} · ${message.level}`;
+    case 'surface.destroy':
+      return message.surface;
+    case 'input.grab':
+      return `${message.keys.join(' ')} · ${message.when}`;
+    case 'input.release':
+      return message.keys.join(' ');
+  }
+}
+
+function describeServer(message: ServerMessage) {
+  switch (message.type) {
+    case 'welcome':
+      return `${message.displays.map((d) => `${d.width}×${d.height}`).join(' · ')} · budget ${message.budget}`;
+    case 'configure':
+      return `${message.surface} · ${message.visible ? 'shown' : 'hidden'}`;
+    case 'frame':
+      return message.surface;
+    case 'input':
+      return message.event.kind === 'button'
+        ? `${message.event.button} ${message.event.action}`
+        : message.event.kind;
+    case 'error':
+      return message.code;
   }
 }
 

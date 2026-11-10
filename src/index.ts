@@ -36,3 +36,5 @@ export {
   type ClientMessage,
   type ServerMessage,
 } from './protocol/messages.js';
+export { Events, MODES, type Mode, type WmEvent, type EventDraft } from './wm/events.js';
+export { EVENTS_PATH, INSPECTOR_PATH } from './wm/inspector.js';

@@ -10,9 +10,12 @@ import { Tokens } from '../protocol/tokens.js';
 import { ProxyServer } from '../proxy/server.js';
 import { Compositor, type Logger } from './compositor.js';
 import { handleControl } from './control.js';
+import { Events, type Mode } from './events.js';
+import { ScreenMirror } from './inspector.js';
 import { Gestures, type Gesture } from './gestures.js';
 import { Scene } from './scene.js';
 import { Supervisor, type AppHealth } from './supervisor.js';
+import { TapRelay } from './tap.js';
 
 export type DaemonDeps = {
   config: Config;
@@ -56,6 +59,10 @@ export class Daemon {
   private input: BarInput | null = null;
   private dropTimer: NodeJS.Timeout | null = null;
   private readonly gestures: Gestures;
+  private readonly events = new Events();
+  private readonly relay: TapRelay;
+  private readonly mirror: ScreenMirror;
+  private mode: Mode;
   private running = false;
   /** The manifest as it stands now, including apps added since startup. */
   private readonly apps: AppManifest[];
@@ -64,8 +71,12 @@ export class Daemon {
     const { config, manifest } = deps;
     this.logger = deps.logger ?? console;
     this.apps = [...manifest.apps];
+    this.mode = config.mode;
+    this.events.emit({ type: 'mode', mode: this.mode });
 
     this.upstream = new Upstream({
+      events: this.events,
+      note: (app, kind, status) => this.relay.note(app, kind, status),
       addr: config.bar.busyAddr,
       timeoutMs: config.requestTimeoutMs,
       ...(config.bar.busyToken ? { token: config.bar.busyToken } : {}),
@@ -85,6 +96,16 @@ export class Daemon {
       tickMs: config.tickMs,
       logger: this.logger,
       onShow: (name) => this.display.show(name),
+      events: this.events,
+      paused: this.mode === 'tap',
+    });
+
+    this.relay = new TapRelay(this.scene, this.upstream, this.logger);
+    this.mirror = new ScreenMirror({
+      upstream: this.upstream,
+      events: this.events,
+      intervalMs: config.screenMs,
+      logger: this.logger,
     });
 
     const tokens = new Tokens();
@@ -94,6 +115,9 @@ export class Daemon {
       frameMs: config.frameMs,
       ...(config.knob ? { reservedKeys: ['encoder' as const] } : {}),
       logger: this.logger,
+      events: this.events,
+      tap: this.mode === 'tap',
+      onFrames: (app) => this.relay.push(app),
     });
 
     this.gestures = new Gestures({
@@ -109,12 +133,17 @@ export class Daemon {
       scene: this.scene,
       logger: this.logger,
       timeoutMs: config.requestTimeoutMs,
+      events: this.events,
+      mode: () => this.mode,
+      note: (app, kind, status) => this.relay.note(app, kind, status),
+      inspectorDir: config.inspectorDir,
       display: this.display,
       control: (req, res) =>
         handleControl(req, res, process.env['WM_API_TOKEN'], {
           status: () => ({
             activeApp: this.compositor.showing,
             pinnedApp: this.compositor.pin,
+            mode: this.mode,
           }),
           apps: () => {
             const ready = new Set(this.scene.candidates().map((app) => app.name));
@@ -141,7 +170,8 @@ export class Daemon {
             return 'pinned';
           },
           automatic: () => this.compositor.unpin(),
-          overlay: (overlay) => this.compositor.showOverlay(overlay),
+          overlay: (overlay) =>
+            this.compositor.showOverlay({ ...overlay, source: 'mcp' }),
           clearOverlay: (display) => this.compositor.clearOverlay(display),
           input: (events) => {
             let recipient = null;
@@ -150,8 +180,20 @@ export class Daemon {
               recipient = this.display.deliver(event);
             }
 
+            const first = events[0];
+
+            if (first) {
+              this.events.emit({
+                type: 'input',
+                key: first.kind === 'button' ? first.button : first.kind,
+                gesture: 'app',
+                ...(recipient ? { to: recipient } : {}),
+              });
+            }
+
             return recipient;
           },
+          setMode: (mode) => this.setMode(mode),
           knobReserved: config.knob,
         }),
       deck: (req, res) => this.deck?.handle(req, res) ?? Promise.resolve(false),
@@ -171,6 +213,8 @@ export class Daemon {
 
   async start(): Promise<void> {
     this.running = true;
+
+    this.mirror.start();
 
     if (this.deps.config.profile) {
       this.deck = mountDeck({
@@ -216,6 +260,11 @@ export class Daemon {
     this.logger.info(
       `[wm] proxying ${this.deps.config.bar.busyAddr} on http://${this.deps.config.host}:${this.proxy.port}`,
     );
+    if (this.deps.config.inspectorDir) {
+      this.logger.info(
+        `[wm] inspector at http://${this.deps.config.host}:${this.proxy.port}/inspector/`,
+      );
+    }
 
     await this.connect();
     if (!this.running) {
@@ -225,8 +274,45 @@ export class Daemon {
     await this.sweep();
 
     this.compositor.start();
+    if (this.mode === 'tap') {
+      this.relay.start();
+      this.logger.info('[wm] tap mode: listening, every app draws to the Bar as itself');
+    }
     await this.supervisor.start();
     this.attachInput();
+  }
+
+  /**
+   * Listening or deciding, switched while everything runs: the apps keep
+   * their address and never restart.
+   *
+   * Into `manage`, the canvas is swept of every app's own elements — it is
+   * about to have one owner — and the compositor draws from the scene, which
+   * tap mode kept current. Into `tap`, the compositor takes its elements off
+   * and every app draws as itself again.
+   */
+  async setMode(mode: Mode) {
+    if (mode === this.mode) {
+      return;
+    }
+
+    this.mode = mode;
+    this.events.emit({ type: 'mode', mode });
+
+    if (mode === 'manage') {
+      this.relay.stop();
+      this.display.setTap(false);
+      await this.sweep();
+      this.compositor.resume();
+      this.logger.info('[wm] manage mode: deciding who has the screen');
+
+      return;
+    }
+
+    await this.compositor.pause();
+    this.display.setTap(true);
+    this.relay.start();
+    this.logger.info('[wm] tap mode: listening, every app draws to the Bar as itself');
   }
 
   /**
@@ -335,6 +421,8 @@ export class Daemon {
       return;
     }
     this.running = false;
+    this.mirror.stop();
+    this.relay.stop();
     this.input?.stop();
     this.gestures.stop();
     if (this.dropTimer) {
@@ -393,6 +481,13 @@ export class Daemon {
   }
 
   private onGesture(gesture: Gesture): void {
+    // Listening, the window manager keeps no keys for itself.
+    if (this.mode === 'tap' && gesture.kind !== 'app') {
+      return;
+    }
+
+    this.tellGesture(gesture);
+
     switch (gesture.kind) {
       case 'next':
         this.compositor.cycle(1);
@@ -412,10 +507,31 @@ export class Daemon {
         this.afterDrop();
 
         return;
-      case 'app':
-        this.display.deliver(gesture.event);
+      case 'app': {
+        const to = this.display.deliver(gesture.event);
+
+        // A turn of the knob is many events a second; only a press is worth a line.
+        if (gesture.event.kind === 'button' && gesture.event.action === 'press') {
+          this.events.emit({
+            type: 'input',
+            key: gesture.event.button,
+            gesture: 'app',
+            ...(to ? { to } : {}),
+          });
+        }
 
         return;
+      }
+    }
+  }
+
+  private tellGesture(gesture: Gesture) {
+    if (gesture.kind === 'next') {
+      this.events.emit({ type: 'input', key: 'ok', gesture: 'next' });
+    } else if (gesture.kind === 'automatic') {
+      this.events.emit({ type: 'input', key: 'back', gesture: 'automatic' });
+    } else if (gesture.kind === 'cycle') {
+      this.events.emit({ type: 'input', key: 'encoder', gesture: 'next' });
     }
   }
 

@@ -1,5 +1,7 @@
 import { BarApiError } from 'busybar-kit/errors';
 import { isCloudAddr } from 'busybar-kit/config';
+import { OWNER } from '../wm/canvas.js';
+import type { DrawKind, Events, Note } from '../wm/events.js';
 import type { Element } from '../wm/scene.js';
 
 /** A `/display/draw` body, as the device takes it. */
@@ -15,6 +17,9 @@ export type UpstreamOptions = {
   token?: string;
   httpPassword?: string;
   timeoutMs?: number;
+  /** Told of every draw and clear that reaches the Bar, for the inspector. */
+  events?: Events;
+  note?: Note;
 };
 
 /**
@@ -66,16 +71,20 @@ export class Upstream {
   }
 
   async draw(payload: DrawPayload): Promise<void> {
-    await this.request('POST', this.url('/display/draw'), {
-      body: JSON.stringify(payload),
-      contentType: 'application/json',
-    });
+    await this.traced(payload.application_name, 'POST', 'draw', () =>
+      this.request('POST', this.url('/display/draw'), {
+        body: JSON.stringify(payload),
+        contentType: 'application/json',
+      }),
+    );
   }
 
   async clear(applicationName?: string): Promise<void> {
-    await this.request(
-      'DELETE',
-      this.url('/display/draw', { application_name: applicationName }),
+    await this.traced(applicationName ?? OWNER, 'DELETE', 'clear', () =>
+      this.request(
+        'DELETE',
+        this.url('/display/draw', { application_name: applicationName }),
+      ),
     );
   }
 
@@ -84,10 +93,36 @@ export class Upstream {
    * request if any one of them is not on the canvas.
    */
   async deleteElements(applicationName: string, ids: string[]): Promise<void> {
-    await this.request('DELETE', this.url('/display/draw'), {
-      body: JSON.stringify({ application_name: applicationName, element_ids: ids }),
-      contentType: 'application/json',
+    await this.traced(applicationName, 'DELETE', 'delete-ids', () =>
+      this.request('DELETE', this.url('/display/draw'), {
+        body: JSON.stringify({ application_name: applicationName, element_ids: ids }),
+        contentType: 'application/json',
+      }),
+    );
+  }
+
+  private async traced(
+    app: string,
+    method: string,
+    kind: DrawKind,
+    run: () => Promise<unknown>,
+  ) {
+    const done = this.options.events?.request({
+      app,
+      to: 'bar',
+      method,
+      path: '/api/display/draw',
     });
+    const answer = (status: number) =>
+      done?.(status, this.options.note?.(app, kind, status));
+
+    try {
+      await run();
+      answer(200);
+    } catch (error) {
+      answer(error instanceof BarApiError && error.status ? error.status : 502);
+      throw error;
+    }
   }
 
   /**

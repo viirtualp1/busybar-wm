@@ -11,6 +11,13 @@ import type { Upstream } from '../bar/upstream.js';
 import { OWNER, rehome } from '../wm/canvas.js';
 import { CONTROL_PATH } from '../wm/control.js';
 import type { Logger } from '../wm/compositor.js';
+import type { DrawKind, Events, Hop, Mode, Note } from '../wm/events.js';
+import {
+  EVENTS_PATH,
+  handleEvents,
+  INSPECTOR_PATH,
+  serveInspector,
+} from '../wm/inspector.js';
 import { DISPLAY_PATH } from '../protocol/messages.js';
 import type { DisplayServer } from '../protocol/server.js';
 import type { Scene } from '../wm/scene.js';
@@ -39,6 +46,14 @@ export type ProxyOptions = {
    * moving is left alone.
    */
   timeoutMs?: number;
+  /** Told of every request an app makes, for the inspector; serves `/wm/v1/events`. */
+  events?: Events;
+  /** Listening or deciding. In `tap`, draws go on to the Bar under each app's own name. */
+  mode?: () => Mode;
+  /** What a draw that reached the Bar did, such as whose elements it wiped. */
+  note?: Note;
+  /** A busybar-inspector build to serve under `/inspector/`. */
+  inspectorDir?: string | null;
 };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -122,7 +137,24 @@ export class ProxyServer {
     const url = new URL(req.url ?? '/', 'http://proxy.invalid');
 
     if (url.pathname === CONTROL_PATH && this.options.control) {
+      // A browser here is the inspector page itself; anything else is a
+      // client such as busybar-mcp, and its commands are worth seeing.
+      if (req.method === 'POST' && !req.headers.origin) {
+        this.trace(res, 'mcp', 'POST', url.pathname, 'other', 'wm');
+      }
+
       return await this.options.control(req, res);
+    }
+
+    if (url.pathname === EVENTS_PATH && this.options.events && req.method === 'GET') {
+      return handleEvents(req, res, this.options.events);
+    }
+
+    if (
+      url.pathname === INSPECTOR_PATH ||
+      url.pathname.startsWith(`${INSPECTOR_PATH}/`)
+    ) {
+      return await serveInspector(req, res, this.options.inspectorDir ?? null);
     }
 
     if (this.options.deck && (await this.options.deck(req, res))) {
@@ -144,8 +176,11 @@ export class ProxyServer {
     if (route === DRAW_PATH && req.method === 'DELETE') {
       return await this.onClear(req, url, res);
     }
-    if (route === ASSETS_PATH && req.method === 'DELETE') {
+    if (route === ASSETS_PATH && req.method === 'DELETE' && !this.tapping()) {
       return this.onAssetsDelete(url, res);
+    }
+    if (route === ASSETS_PATH && req.method === 'POST') {
+      return await this.onUpload(req, res, url);
     }
     if (route === ASSETS_PATH) {
       rehomeUpload(url);
@@ -182,7 +217,15 @@ export class ProxyServer {
       );
     }
 
+    this.trace(res, payload.application_name, 'POST', urlOf(req).pathname, 'draw');
+    // Kept in tap mode too, so the window manager has every frame the moment
+    // it starts deciding.
     legacyDraw(this.options.scene, payload);
+
+    if (this.tapping()) {
+      return this.passThroughBody(req, res, urlOf(req), body);
+    }
+
     ok(res);
   }
 
@@ -209,6 +252,15 @@ export class ProxyServer {
       ? body.element_ids.filter((id): id is string => typeof id === 'string')
       : undefined;
 
+    if (this.tapping()) {
+      if (name) {
+        this.trace(res, name, 'DELETE', url.pathname, ids ? 'delete-ids' : 'clear');
+        legacyClear(this.options.scene, name, ids);
+      }
+
+      return this.passThroughBody(req, res, url, raw);
+    }
+
     if (!name) {
       // Under the window manager an app only ever speaks for itself, and a
       // clear with no name would take the screen from whoever holds it.
@@ -220,8 +272,41 @@ export class ProxyServer {
       return ok(res);
     }
 
+    this.trace(res, name, 'DELETE', url.pathname, ids ? 'delete-ids' : 'clear');
     legacyClear(this.options.scene, name, ids);
     ok(res);
+  }
+
+  /**
+   * An upload, into `OWNER`'s folder where the window manager draws it from.
+   * In tap mode the app draws under its own name, from its own folder, so the
+   * file goes there as well — and is already in place when deciding starts.
+   */
+  private async onUpload(req: IncomingMessage, res: ServerResponse, url: URL) {
+    this.trace(
+      res,
+      url.searchParams.get('application_name') ?? 'unknown',
+      'POST',
+      url.pathname,
+      'other',
+    );
+
+    if (!this.tapping()) {
+      rehomeUpload(url);
+
+      return this.passThrough(req, res, url);
+    }
+
+    const body = await readBody(req);
+    const rehomed = new URL(url);
+
+    rehomeUpload(rehomed);
+
+    if (rehomed.search !== url.search) {
+      this.sendCopy(req, rehomed, body);
+    }
+
+    this.passThroughBody(req, res, url, body);
   }
 
   /**
@@ -257,7 +342,12 @@ export class ProxyServer {
 
     const name = body['application_name'];
     const path = body['path'];
-    if (typeof name !== 'string' || typeof path !== 'string') {
+
+    if (typeof name === 'string') {
+      this.trace(res, name, 'POST', url.pathname, 'other');
+    }
+
+    if (typeof name !== 'string' || typeof path !== 'string' || this.tapping()) {
       return this.passThroughBody(req, res, url, raw);
     }
 
@@ -292,6 +382,53 @@ export class ProxyServer {
       body.length,
     );
     proxied.end(body);
+  }
+
+  /** The same request again, to somewhere the app did not ask for; nobody waits on it. */
+  private sendCopy(req: IncomingMessage, url: URL, body: Buffer) {
+    const target = this.rewrite(url);
+    const send = target.protocol === 'https:' ? httpsRequest : httpRequest;
+    const headers = this.forwardHeaders(req, target);
+
+    headers['content-length'] = String(body.length);
+    delete headers['transfer-encoding'];
+
+    const copy = send(target, { method: req.method ?? 'POST', headers }, (answer) => {
+      answer.resume();
+    });
+
+    copy.setTimeout(this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS, () => {
+      copy.destroy(new UpstreamTimeout());
+    });
+    copy.on('error', (error) => {
+      this.logger.warn(`[proxy] ${target.pathname}: ${errorMessage(error)}`);
+    });
+    copy.end(body);
+  }
+
+  private tapping() {
+    return this.options.mode?.() === 'tap';
+  }
+
+  /** Reports an app's request when it is answered, with what the answer did on the Bar. */
+  private trace(
+    res: ServerResponse,
+    app: string,
+    method: string,
+    path: string,
+    kind: DrawKind,
+    to: Hop = this.tapping() ? 'bar' : 'wm',
+  ) {
+    const done = this.options.events?.request({ app, to, method, path });
+
+    res.on('close', () => {
+      const status = res.headersSent ? res.statusCode : 499;
+      // Worked out whether or not anyone is watching: tap mode keeps its
+      // idea of who owns the Bar from it.
+      const note = to === 'bar' ? this.options.note?.(app, kind, status) : undefined;
+
+      done?.(status, note);
+    });
   }
 
   private open(
@@ -425,6 +562,10 @@ export function rehomeUpload(url: URL): void {
   }
   url.searchParams.set('application_name', OWNER);
   url.searchParams.set('file', rehome(name, file));
+}
+
+function urlOf(req: IncomingMessage) {
+  return new URL(req.url ?? '/', 'http://proxy.invalid');
 }
 
 function ok(res: ServerResponse): void {

@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { loadBarConfig, type BarConfig } from 'busybar-kit/config';
 import { DEFAULT_CONFIG_FILES } from './manifest.js';
+import type { Mode } from './wm/events.js';
 
 /** `~/.busybar` is how anyone would write it down, so it has to work. */
 export function expandHome(path: string): string {
@@ -22,6 +23,7 @@ export const DEFAULTS = {
   staleMs: 600_000,
   restartDelayMs: 2000,
   requestTimeoutMs: 10_000,
+  screenMs: 250,
 } as const;
 
 const LIMITS = {
@@ -33,6 +35,7 @@ const LIMITS = {
   staleMs: { min: 1000, max: 86_400_000 },
   restartDelayMs: { min: 200, max: 60_000 },
   requestTimeoutMs: { min: 1000, max: 30_000 },
+  screenMs: { min: 100, max: 5000 },
 } as const;
 
 export type Config = {
@@ -63,6 +66,16 @@ export type Config = {
    * repeated lines; `verbose` shows every line as it came.
    */
   log: 'normal' | 'verbose';
+  /**
+   * `manage` decides who has the screen. `tap` only listens: every draw goes
+   * on to the Bar under the app's own name, as if the window manager were not
+   * there, until it is switched to `manage` — live, without a restart.
+   */
+  mode: Mode;
+  /** A busybar-inspector build, served at `/inspector/`. */
+  inspectorDir: string | null;
+  /** How often the Bar's front panel is read back while the inspector is open. */
+  screenMs: number;
 };
 
 export function loadConfig(
@@ -110,6 +123,11 @@ export function loadConfig(
       input: read('WM_INPUT') !== '0',
       knob: read('WM_KNOB') === '1',
       log: read('WM_LOG').toLowerCase() === 'verbose' ? 'verbose' : 'normal',
+      mode: read('WM_MODE').toLowerCase() === 'tap' ? 'tap' : 'manage',
+      inspectorDir: read('WM_INSPECTOR_DIR')
+        ? resolve(expandHome(read('WM_INSPECTOR_DIR')))
+        : null,
+      screenMs: number('WM_SCREEN_MS', DEFAULTS.screenMs, LIMITS.screenMs, true),
     },
   };
 }

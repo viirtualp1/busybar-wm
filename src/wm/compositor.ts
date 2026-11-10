@@ -3,6 +3,7 @@ import type { Upstream } from '../bar/upstream.js';
 import { cycleOrder, decide, nextPin } from './arbiter.js';
 import { compose, diff, MAX_ELEMENTS, OWNER, type Desired } from './canvas.js';
 import type { Overlay } from './control.js';
+import type { EventDraft, Events } from './events.js';
 import { DEFAULT_PRIORITY, type Element, type Scene } from './scene.js';
 
 export type Logger = {
@@ -24,6 +25,10 @@ export type CompositorOptions = {
   logger?: Logger;
   /** Told whenever a different app — or none — takes the screen. */
   onShow?: (name: string | null) => void;
+  /** Told of every decision and every change to the canvas, for the inspector. */
+  events?: Events;
+  /** Start without drawing, as in tap mode, until `resume`. */
+  paused?: boolean;
 };
 
 /**
@@ -52,6 +57,13 @@ export class Compositor {
   private running = false;
   private timer: NodeJS.Timeout | null = null;
   private warnedPriority = false;
+  private paused: boolean;
+  private draining: Promise<void> | null = null;
+  /** The last decision told, so the same one is not told every tick. */
+  private toldDecision = '';
+  /** Whose frame, and which overlays, the canvas held after the last push. */
+  private pushedFor: string | null = null;
+  private pushedOverlays = '';
   private readonly logger: Logger;
 
   constructor(
@@ -60,6 +72,7 @@ export class Compositor {
     private readonly options: CompositorOptions,
   ) {
     this.logger = options.logger ?? console;
+    this.paused = options.paused ?? false;
   }
 
   get showing(): string | null {
@@ -100,7 +113,44 @@ export class Compositor {
     if (this.flushing) {
       return;
     }
-    void this.drain();
+    this.draining = this.drain();
+  }
+
+  /**
+   * Stops drawing and takes everything of ours off the canvas, for tap mode.
+   * The scene goes on being kept, so `resume` has every frame to hand.
+   */
+  async pause() {
+    if (this.paused) {
+      return;
+    }
+
+    this.paused = true;
+    await this.draining;
+
+    try {
+      await this.clearOwn();
+    } catch (error) {
+      this.logger.warn(`[wm] could not clear the canvas: ${errorMessage(error)}`);
+    }
+
+    this.current = null;
+    this.pushedFor = null;
+    this.pushedOverlays = '';
+    this.toldDecision = '';
+  }
+
+  /** Decides and draws again, from a canvas whose contents are not known. */
+  resume() {
+    if (!this.paused) {
+      return;
+    }
+
+    this.paused = false;
+    this.device = null;
+    this.current = null;
+    this.currentSince = 0;
+    this.wake();
   }
 
   /**
@@ -148,6 +198,14 @@ export class Compositor {
 
   showOverlay(overlay: Overlay) {
     const { display, endsAt } = overlay;
+
+    this.options.events?.emit({
+      type: 'overlay',
+      state: 'shown',
+      source: overlay.source ?? 'control',
+      text: overlay.text,
+      durationMs: Math.max(0, endsAt - Date.now()),
+    });
     clearTimeout(this.overlayExpiry.get(display));
     const expiry = setTimeout(
       () => this.clearOverlay(display),
@@ -163,6 +221,16 @@ export class Compositor {
     const targets = display ? [display] : [...this.overlays.keys()];
 
     for (const target of targets) {
+      const overlay = this.overlays.get(target);
+
+      if (overlay) {
+        this.options.events?.emit({
+          type: 'overlay',
+          state: 'cleared',
+          source: overlay.source ?? 'control',
+        });
+      }
+
       clearTimeout(this.overlayExpiry.get(target));
       this.overlayExpiry.delete(target);
       this.overlays.delete(target);
@@ -221,6 +289,10 @@ export class Compositor {
   }
 
   private async flush(): Promise<void> {
+    if (this.paused) {
+      return;
+    }
+
     const now = Date.now();
     this.expirePin(now);
 
@@ -250,15 +322,20 @@ export class Compositor {
       this.options.onShow?.(decision.name);
     }
 
+    this.tell(decision, now);
+
     const surfaces = this.current ? this.scene.visible(this.current) : [];
     const desired: Desired = this.current
       ? compose(this.current, surfaces)
       : { elements: new Map(), priority: 0 };
     this.applyOverlays(desired, now);
     const frames = `${this.current ?? ''}\n${surfaces.map((s) => s.frameKey).join('\n')}`;
+    const overlays = [...this.overlays.values()]
+      .map((o) => `${o.display}:${o.text}`)
+      .join('\n');
 
     try {
-      await this.push(desired, frames);
+      await this.push(desired, frames, overlays);
       this.warnedPriority = false;
     } catch (error) {
       // Someone flipped the Bar to its own BUSY session; the frame is still
@@ -279,10 +356,13 @@ export class Compositor {
     }
   }
 
-  private async push(desired: Desired, frames: string): Promise<void> {
+  private async push(desired: Desired, frames: string, overlays: string): Promise<void> {
+    const before = this.device?.size ?? 0;
+
     if (desired.elements.size === 0) {
       if (this.device === null || this.device.size > 0) {
         await this.clearOwn();
+        this.told({ add: 0, change: 0, remove: before, cleared: true }, overlays);
       }
 
       return;
@@ -290,14 +370,24 @@ export class Compositor {
 
     // The device refuses a draw from its owner at a lower priority than the
     // last one; an empty canvas has none.
+    let cleared = false;
     if (
       this.device === null ||
       (desired.priority < this.devicePriority && this.device.size > 0)
     ) {
       await this.clearOwn();
+      cleared = true;
     }
     const device = this.device ?? new Map<string, string>();
     const plan = diff(device, desired);
+    const upserted = new Set(plan.upsert.map((element) => element.id));
+    const counts = {
+      add: plan.upsert.filter((element) => !device.has(element.id)).length,
+      change: plan.upsert.filter((element) => device.has(element.id)).length,
+      remove:
+        plan.remove.filter((id) => !upserted.has(id)).length + (cleared ? before : 0),
+      cleared,
+    };
 
     if (plan.remove.length > 0) {
       await this.upstream.deleteElements(OWNER, plan.remove);
@@ -332,6 +422,68 @@ export class Compositor {
         this.ledFor = frames;
       }
     }
+
+    if (counts.add + counts.change + counts.remove > 0 || counts.cleared) {
+      this.told(counts, overlays);
+    }
+  }
+
+  /** A decision, once — not again every tick it stays the same. */
+  private tell(decision: ReturnType<typeof decide>, now: number) {
+    const events = this.options.events;
+
+    if (!events) {
+      return;
+    }
+
+    const candidates = this.scene
+      .candidates(now)
+      .map(({ name, rank, want }) => ({ name, rank, want }));
+    const key = JSON.stringify([decision, this.pinned, candidates]);
+
+    if (key === this.toldDecision) {
+      return;
+    }
+
+    this.toldDecision = key;
+    events.emit({
+      type: 'decision',
+      winner: decision.name,
+      reason: decision.reason,
+      pinned: this.pinned,
+      holdMs: this.current
+        ? Math.max(0, this.options.minHoldMs - (now - this.currentSince))
+        : 0,
+      candidates,
+    });
+  }
+
+  /** What one push did to the canvas, and why it was pushed. */
+  private told(
+    counts: Pick<
+      Extract<EventDraft, { type: 'diff' }>,
+      'add' | 'change' | 'remove' | 'cleared'
+    >,
+    overlays: string,
+  ) {
+    const cause =
+      this.current !== this.pushedFor
+        ? 'switch'
+        : overlays !== this.pushedOverlays
+          ? 'overlay'
+          : 'frame';
+
+    this.options.events?.emit({
+      type: 'diff',
+      cause,
+      from: this.pushedFor,
+      to: this.current,
+      ...counts,
+      total: this.device?.size ?? 0,
+      budget: MAX_ELEMENTS,
+    });
+    this.pushedFor = this.current;
+    this.pushedOverlays = overlays;
   }
 
   /**

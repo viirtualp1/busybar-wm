@@ -1,12 +1,15 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { InputEvent } from '../bar/input.js';
+import { MODES, type Mode } from './events.js';
 
 export type Overlay = {
   kind: 'message' | 'timer';
   text: string;
   display: 'front' | 'back';
   endsAt: number;
+  /** Who asked for it, for the inspector. */
+  source?: string;
 };
 
 type Control = {
@@ -17,6 +20,8 @@ type Control = {
   overlay: (overlay: Overlay) => void;
   clearOverlay: (display?: Overlay['display']) => void;
   input: (events: InputEvent[]) => string | null;
+  /** Listening (`tap`) or deciding (`manage`). */
+  setMode: (mode: Mode) => Promise<void>;
   knobReserved: boolean;
 };
 
@@ -126,6 +131,16 @@ export async function handleControl(
         endsAt: new Date(endsAt).toISOString(),
       });
     }
+    case 'mode': {
+      const mode = 'mode' in command ? command.mode : undefined;
+      if (!MODES.includes(mode as Mode)) {
+        return send(res, 400, { error: 'Expected mode "tap" or "manage"' });
+      }
+
+      await control.setMode(mode as Mode);
+
+      return send(res, 200, { mode });
+    }
     case 'input': {
       const input = 'key' in command ? command.key : undefined;
       const delta = 'delta' in command ? command.delta : undefined;
@@ -169,23 +184,45 @@ export async function handleControl(
 }
 
 function authorized(req: IncomingMessage, token: string | undefined) {
-  if (req.headers.origin) {
-    return false;
-  }
-
   if (token) {
     const provided = Buffer.from(req.headers.authorization ?? '');
     const expected = Buffer.from(`Bearer ${token}`);
 
-    return provided.length === expected.length && timingSafeEqual(provided, expected);
+    return (
+      !req.headers.origin &&
+      provided.length === expected.length &&
+      timingSafeEqual(provided, expected)
+    );
   }
 
+  return isLocal(req);
+}
+
+/**
+ * A request from this machine, by a loopback name, and — when a browser sent
+ * it — from a page this process served. Another site's page can make the
+ * browser send a request here, but not with this origin.
+ */
+export function isLocal(req: IncomingMessage) {
   const host = req.headers.host ?? '';
+  const origin = req.headers.origin;
+
+  if (origin && !sameHost(origin, host)) {
+    return false;
+  }
 
   return (
     LOOPBACK.has(req.socket.remoteAddress ?? '') &&
     /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host)
   );
+}
+
+function sameHost(origin: string, host: string) {
+  try {
+    return new URL(origin).host === host.toLowerCase();
+  } catch {
+    return false;
+  }
 }
 
 async function readCommand(req: IncomingMessage) {
